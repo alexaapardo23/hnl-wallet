@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: hnl-postgres
+    environment:
+      POSTGRES_DB: hnl_wallet
+      POSTGRES_USER: hnl_user
+      POSTGRES_PASSWORD: hnl_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:latest
+    container_name: hnl-tigerbeetle
+    command: start --addresses=0.0.0.0:3000 /data/0.tigerbeetle
+    ports:
+      - "3000:3000"
+    volumes:
+      - tigerbeetle_data:/data
+    security_opt:
+      - seccomp=unconfined
+
+volumes:
+  postgres_data:
+  tigerbeetle_data:
