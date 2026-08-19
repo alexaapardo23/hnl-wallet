@@ -300,6 +300,7 @@ All request/response bodies are JSON. Endpoints under `Auth required` expect `Au
 | `GET` | `/accounts/{account_number}` | Yes | PostgreSQL metadata (`account_type`, `currency`, `initial_balance`) plus live `balance` from TigerBeetle, in one call |
 | `GET` | `/accounts/{account_number}/balance` | Yes | Live balance from TigerBeetle only — lighter-weight than the detail endpoint above, for polling |
 | `GET` | `/accounts/{account_number}/transactions` | Yes | Transfer history for the account, newest first (`?limit=`, default `50`, max `200`) — see note below |
+| `POST` | `/accounts/{account_number}/deposit` | Yes | Credit the account from `SystemAccountID` (`{"amount": 500.25}`, must be `> 0`) — see [Financial Operations](#financial-operations) |
 
 Every `/accounts/...` route is scoped to accounts owned by the authenticated user; another user's account (or a nonexistent one) returns `404` either way, so ownership can't be probed by comparing error responses.
 
@@ -358,7 +359,29 @@ The dataset does not prevent overdrafts — transaction amounts are not capped b
 Both anomalies documented above — duplicate emails and negative-balance overdrafts — are **only tolerated in the seed dataset**, never for data created through the API:
 
 - Duplicate emails: enforced already — see [New registrations require a unique email](#new-registrations-require-a-unique-email). `POST /auth/register` rejects any email already in use, seed or not.
-- Overdrafts: accounts created via `POST /accounts` start at a `$0` balance and there is no transfer-creation endpoint yet (`POST /accounts` and the [three seed programs](#seed-data) are the only ways an account's balance changes today), so overdraft protection has nothing to enforce yet. Once a transfer/transaction-creation endpoint is added, it must set `debits_must_not_exceed_credits` (or reject in application code) so newly created accounts can't go negative the way seeded ones intentionally can.
+- Overdrafts: `POST /accounts/{account_number}/deposit` (see below) can only ever increase a balance, so it can't produce an overdraft. The first endpoint capable of *decreasing* a balance (a withdrawal or transfer) still doesn't exist yet — when one is added, it must set `debits_must_not_exceed_credits` (or reject in application code) so accounts created or moved through the API can't go negative the way seeded ones intentionally can.
+
+### Deposits
+
+`POST /accounts/{account_number}/deposit` (`{"amount": 500.25}`) follows:
+
+```text
+request
+  ↓
+JWT → user_id
+  ↓
+verify the account belongs to the user
+  ↓
+validate amount > 0
+  ↓
+SYSTEM → user account   (Code = CodeDeposit = 101)
+  ↓
+TigerBeetle
+```
+
+It reuses the exact same debit-leaves/credit-arrives convention and `CodeDeposit` (`101`) as the historical deposits imported by `cmd/seed-transactions` (see [Historical Transaction Import](#historical-transaction-import)) — a deposit made through the API and one replayed from `data.json` are indistinguishable in TigerBeetle except for their `Timestamp`. The response includes the new live balance, so the caller doesn't need a separate `GET .../balance` call to confirm the deposit landed.
+
+Implemented in [`backend/api/deposit.go`](backend/api/deposit.go).
 
 ## AI / MCP Integration
 

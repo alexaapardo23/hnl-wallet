@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"math"
 	"os"
 
 	tb "github.com/tigerbeetle/tigerbeetle-go"
@@ -13,12 +12,6 @@ import (
 )
 
 const ledger = 700
-
-// centsFromDollars converts a data.json initial_balance (dollars, float64)
-// into the integer cents TigerBeetle amounts are represented in.
-func centsFromDollars(dollars float64) uint64 {
-	return uint64(math.Round(dollars * 100))
-}
 
 func main() {
 	dataFile := os.Getenv("DATA_FILE")
@@ -43,7 +36,7 @@ func main() {
 	var totalCents uint64
 
 	for i, account := range data.Accounts {
-		amountCents := centsFromDollars(account.InitialBalance)
+		amountCents := tigerbeetle.CentsFromDollars(account.InitialBalance)
 		totalCents += amountCents
 
 		transfers = append(transfers, tb.Transfer{
