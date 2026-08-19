@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -47,11 +48,30 @@ var apiBaseURL string
 // callAPI makes an authenticated GET against the HNL Wallet API, forwarding
 // the caller's token unchanged.
 func callAPI(ctx context.Context, path, bearerToken string) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBaseURL+path, nil)
+	return doAPI(ctx, http.MethodGet, path, nil, bearerToken)
+}
+
+// postAPI makes an authenticated POST with a JSON body against the HNL
+// Wallet API, forwarding the caller's token unchanged.
+//
+// This is the entire enforcement boundary for deposit/withdraw/transfer:
+// this server never checks whose account_number/from_account it was given —
+// it forwards it, and the HNL Wallet API decides, from the token alone,
+// whether the account actually belongs to the caller (see
+// api.lookupOwnedAccount). A model that hallucinates or is tricked into
+// requesting someone else's account_number gets exactly the same 404 a
+// direct REST call would.
+func postAPI(ctx context.Context, path string, body []byte, bearerToken string) ([]byte, int, error) {
+	return doAPI(ctx, http.MethodPost, path, bytes.NewReader(body), bearerToken)
+}
+
+func doAPI(ctx context.Context, method, path string, body io.Reader, bearerToken string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, method, apiBaseURL+path, body)
 	if err != nil {
 		return nil, 0, err
 	}
 	req.Header.Set("Authorization", bearerToken)
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -59,8 +79,8 @@ func callAPI(ctx context.Context, path, bearerToken string) ([]byte, int, error)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	return body, resp.StatusCode, err
+	respBody, err := io.ReadAll(resp.Body)
+	return respBody, resp.StatusCode, err
 }
 
 type accountSummary struct {
@@ -145,6 +165,120 @@ func handleGetBalance(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 		return mcp.NewToolResultErrorFromErr("failed to reach HNL Wallet API", err), nil
 	}
 	if status != http.StatusOK {
+		return mcp.NewToolResultErrorf("HNL Wallet API returned %d: %s", status, string(body)), nil
+	}
+
+	return mcp.NewToolResultText(string(body)), nil
+}
+
+// handleDeposit, handleWithdraw, and handleTransfer are pure wrappers around
+// their REST equivalents (see README Financial Operations) — same as every
+// read tool, this server does no validation of its own. Ownership,
+// amount > 0, and sufficient-funds checks all happen exactly once, in the
+// HNL Wallet API, whether the caller is a REST client or this MCP server.
+//
+// None of these three execute anything by themselves: POST /chat never
+// calls them directly on the model's first tool call — it always routes
+// through a signed confirmation token first (see backend/api/chat.go and
+// README Financial Actions Require Confirmation). These handlers exist so
+// that *whatever already-confirmed* action gets executed still goes
+// through the same MCP -> Go API path as every read tool, rather than a
+// separate one.
+func handleDeposit(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	token, err := bearerTokenFromContext(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	accountNumber, err := request.RequireString("account_number")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	amount, err := request.RequireFloat("amount")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	reqBody, err := json.Marshal(map[string]float64{"amount": amount})
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr("failed to encode request", err), nil
+	}
+
+	body, status, err := postAPI(ctx, "/accounts/"+accountNumber+"/deposit", reqBody, token)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr("failed to reach HNL Wallet API", err), nil
+	}
+	if status != http.StatusCreated {
+		return mcp.NewToolResultErrorf("HNL Wallet API returned %d: %s", status, string(body)), nil
+	}
+
+	return mcp.NewToolResultText(string(body)), nil
+}
+
+func handleWithdraw(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	token, err := bearerTokenFromContext(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	accountNumber, err := request.RequireString("account_number")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	amount, err := request.RequireFloat("amount")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	reqBody, err := json.Marshal(map[string]float64{"amount": amount})
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr("failed to encode request", err), nil
+	}
+
+	body, status, err := postAPI(ctx, "/accounts/"+accountNumber+"/withdraw", reqBody, token)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr("failed to reach HNL Wallet API", err), nil
+	}
+	if status != http.StatusCreated {
+		return mcp.NewToolResultErrorf("HNL Wallet API returned %d: %s", status, string(body)), nil
+	}
+
+	return mcp.NewToolResultText(string(body)), nil
+}
+
+func handleTransfer(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	token, err := bearerTokenFromContext(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	fromAccount, err := request.RequireString("from_account")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	toAccount, err := request.RequireString("to_account")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	amount, err := request.RequireFloat("amount")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	reqBody, err := json.Marshal(map[string]any{
+		"from_account": fromAccount,
+		"to_account":   toAccount,
+		"amount":       amount,
+	})
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr("failed to encode request", err), nil
+	}
+
+	body, status, err := postAPI(ctx, "/transfers", reqBody, token)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr("failed to reach HNL Wallet API", err), nil
+	}
+	if status != http.StatusCreated {
 		return mcp.NewToolResultErrorf("HNL Wallet API returned %d: %s", status, string(body)), nil
 	}
 
@@ -304,6 +438,57 @@ func main() {
 			mcp.Description("Maximum number of transactions to return (default 10)."),
 		),
 	), handleGetTransactionHistory)
+
+	// Financial actions. These move real money, so POST /chat never invokes
+	// them on a model's first request — it always requires a signed
+	// confirmation token first (see README Financial Actions Require
+	// Confirmation). That gate lives in the chat orchestrator, not here:
+	// these tools stay pure wrappers, like every read tool above, so the
+	// only thing standing between "the model asked for this" and "this
+	// actually happened to real money" is the confirmation step plus the
+	// HNL Wallet API's own ownership/funds checks — not this server.
+	mcpServer.AddTool(mcp.NewTool("deposit",
+		mcp.WithDescription("Credit money into one of the authenticated user's own accounts, from the external funding source. Only ever called after the user has explicitly confirmed the exact amount and account in chat."),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithString("account_number",
+			mcp.Description("The account to credit, e.g. 4001-1234-5678-0001. Must belong to the authenticated user."),
+			mcp.Required(),
+		),
+		mcp.WithNumber("amount",
+			mcp.Description("Amount in USD, must be greater than 0."),
+			mcp.Required(),
+		),
+	), handleDeposit)
+
+	mcpServer.AddTool(mcp.NewTool("withdraw",
+		mcp.WithDescription("Debit money out of one of the authenticated user's own accounts, to the external funding source. Only ever called after the user has explicitly confirmed the exact amount and account in chat."),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithString("account_number",
+			mcp.Description("The account to debit, e.g. 4001-1234-5678-0001. Must belong to the authenticated user."),
+			mcp.Required(),
+		),
+		mcp.WithNumber("amount",
+			mcp.Description("Amount in USD, must be greater than 0 and not exceed the account's current balance."),
+			mcp.Required(),
+		),
+	), handleWithdraw)
+
+	mcpServer.AddTool(mcp.NewTool("transfer",
+		mcp.WithDescription("Move money from one of the authenticated user's own accounts to any account (their own or someone else's). Only ever called after the user has explicitly confirmed the exact amount and accounts in chat."),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithString("from_account",
+			mcp.Description("The source account, e.g. 4001-1234-5678-0001. Must belong to the authenticated user — the HNL Wallet API rejects it otherwise, regardless of what is passed here."),
+			mcp.Required(),
+		),
+		mcp.WithString("to_account",
+			mcp.Description("The destination account. Does not have to belong to the authenticated user."),
+			mcp.Required(),
+		),
+		mcp.WithNumber("amount",
+			mcp.Description("Amount in USD, must be greater than 0 and not exceed from_account's current balance."),
+			mcp.Required(),
+		),
+	), handleTransfer)
 
 	httpServer := server.NewStreamableHTTPServer(
 		mcpServer,

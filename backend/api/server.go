@@ -42,6 +42,7 @@ func NewRouter(s *Server) http.Handler {
 	mux.Handle("POST /transfers", s.requireAuth(http.HandlerFunc(s.transferHandler)))
 
 	mux.Handle("POST /chat", s.requireAuth(http.HandlerFunc(s.chatHandler)))
+	mux.Handle("POST /chat/confirm", s.requireAuth(http.HandlerFunc(s.chatConfirmHandler)))
 
 	return mux
 }

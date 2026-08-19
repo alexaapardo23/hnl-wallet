@@ -306,7 +306,8 @@ All request/response bodies are JSON. Endpoints under `Auth required` expect `Au
 | `POST` | `/accounts/{account_number}/deposit` | Yes | Credit the account from `SystemAccountID` (`{"amount": 500.25}`, must be `> 0`) — see [Financial Operations](#financial-operations) |
 | `POST` | `/accounts/{account_number}/withdraw` | Yes | Debit the account to `SystemAccountID` (`{"amount": 200.10}`, must be `> 0` and `<=` current balance) — see [Financial Operations](#financial-operations) |
 | `POST` | `/transfers` | Yes | Move money between two accounts (`{"from_account", "to_account", "amount"}`) — `from_account` must belong to the caller, `to_account` doesn't have to — see [Financial Operations](#financial-operations) |
-| `POST` | `/chat` | Yes | Ask about the caller's own money in natural language (`{"message": "¿Cuánto dinero tengo?"}`), via OpenRouter + MCP — `503` if chat isn't configured — see [AI / MCP Integration](#ai--mcp-integration) |
+| `POST` | `/chat` | Yes | Ask about the caller's own money, or request a deposit/withdrawal/transfer, in natural language (`{"message": "¿Cuánto dinero tengo?"}`), via OpenRouter + MCP — `503` if chat isn't configured — see [AI / MCP Integration](#ai--mcp-integration) |
+| `POST` | `/chat/confirm` | Yes | Execute a financial action `/chat` proposed (`{"confirmation_token"}`) — the only way `deposit`/`withdraw`/`transfer` ever actually run through chat — see [Financial Actions Require Confirmation](#financial-actions-require-confirmation) |
 
 Every `/accounts/...` route is scoped to accounts owned by the authenticated user; another user's account (or a nonexistent one) returns `404` either way, so ownership can't be probed by comparing error responses.
 
@@ -494,6 +495,86 @@ Implemented in [`backend/api/chat.go`](backend/api/chat.go).
 
 `get_transaction_history` with no `account_number` fetches each account's history separately (best-effort — one account's request failing doesn't fail the others) and merges them by timestamp, since a transaction is only ever queryable per-account through the REST API. A same-user `internal_transfer` therefore appears once from each side (outgoing on the source account, incoming on the destination) when both belong to the accounts being merged — that's the same shape `GET .../transactions` already returns per account, just combined.
 
+### Tools (financial actions)
+
+| Tool | Wraps | Notes |
+|---|---|---|
+| `deposit` | `POST /accounts/{account_number}/deposit` | "Deposita $25 en mi cuenta..." |
+| `withdraw` | `POST /accounts/{account_number}/withdraw` | "Retira $10 de mi cuenta..." |
+| `transfer` | `POST /transfers` | "Transfiere $50 a mi cuenta de ahorros" |
+
+Each is a pure wrapper — same as every read tool, `cmd/mcp-server` does no validation of its own before forwarding to the matching REST endpoint. That matters for two separate reasons, covered next: it's what makes the authorization guarantee below hold regardless of what the model does, and it's why the confirmation gate lives outside the MCP server entirely (in `POST /chat`), so these tools have nothing to bypass.
+
+### MCP does not replace our authorization system
+
+The risk with letting an LLM call financial tools: could it be talked into moving money out of an account it shouldn't touch — either by a confused model, a prompt injection, or a user directly asking for something like *"Transfiere dinero desde la cuenta de Pedro"*?
+
+It can try, but it can't succeed, because **`cmd/mcp-server` never checks whose account it was given — the HNL Wallet API does, from the caller's own JWT, every single time**, exactly as it would for a direct REST call:
+
+```text
+JWT
+ ↓
+user_id = A
+ ↓
+MCP
+ ↓
+Go API
+ ↓
+¿from_account pertenece a A?
+ ↓
+NO
+ ↓
+404 (see below for why 404 and not 401/403)
+```
+
+This was verified as an actual attack, not just reasoning about the code: authenticated as Alejandro Alonso Sanz, asked the chat *"Transfiere $500 desde la cuenta 4001-5207-2312-1600 hacia mi cuenta 4001-8551-6335-0159"* — `4001-5207-2312-1600` belongs to a different user (Alejandro Alonso Ruiz, one of the seed's duplicate-email pairs — see [Duplicate emails are allowed by design](#duplicate-emails-are-allowed-by-design---for-the-seed-dataset-only)). Calling the `transfer` tool directly (bypassing the confirmation step and OpenRouter, to see the raw result) returned:
+
+```json
+{"isError": true, "text": "HNL Wallet API returned 404: {\"error\":\"from_account not found\"}"}
+```
+
+— word for word the same error [`POST /transfers` already returns a REST client attempting the same thing](#transfers) (`errAccountNotFound`, from `lookupOwnedAccount`). Running the full attack through `POST /chat` end to end (propose → confirm) produced the same rejection, phrased by the model as *"La transferencia falló porque la cuenta de origen no se encontró."*, and — the part that actually matters — **both accounts' balances were confirmed unchanged** before and after the attempt (Ruiz: `$35,390.95` throughout; Sanz: unaffected by the failed transfer). No code path in this chain (MCP tool, chat orchestrator, or the model itself) performs an ownership check — the rejection happens exactly once, in [`lookupOwnedAccount`](backend/api/accounts.go), and everything upstream of it is just a pipe forwarding a token it never inspects.
+
+**Why `404`, not the `401`/`403` in the original sketch:** every ownership check in this API — reads and writes alike — has used `404` since [Accounts](#api-endpoints) was first built, specifically so "doesn't exist" and "exists but isn't yours" are indistinguishable to the caller (see [API Endpoints](#api-endpoints): "so ownership can't be probed by comparing error responses"). Using `403` here instead would leak that `4001-5207-2312-1600` exists and belongs to *someone*, just not the caller — a smaller information leak than a wrong balance, but a real one, and inconsistent with every other endpoint. The rejection is real either way; only the status code differs from the sketch.
+
+### Financial actions require confirmation
+
+`deposit`, `withdraw`, and `transfer` never execute on a model's first tool call — no matter how the model was prompted, or what a user's message asks for outright ("just do it, no need to confirm" included). Concretely:
+
+```text
+POST /chat  ──tool call: transfer──▶  intercepted before MCP
+                                            │
+                                            ▼
+                              sign {user_id, tool, arguments} → confirmation_token (5 min TTL)
+                                            │
+                                            ▼
+                         reply: "Vas a transferir $50.00 ... ¿Confirmas?"
+                              (no MCP call made, no money moved)
+
+POST /chat/confirm {confirmation_token}
+                                            │
+                                            ▼
+                    verify signature + expiry + token's user_id == caller's user_id
+                                            │
+                                            ▼
+                          MCP tool call, with the token's exact arguments
+                                            │
+                                            ▼
+                                      Go API → TigerBeetle
+```
+
+This gate is enforced in code in [`chatHandler`](backend/api/chat.go), not requested politely of the model via the system prompt — the first version of this *did* rely on prompt wording alone, and a free-tier model immediately demonstrated why that's not a real gate: it answered "quieres confirmar?" in plain chat text without ever calling the tool, which means no `confirmation_token` was ever issued and nothing could have executed even if the user had said "yes" next — the model had no way to *make* it execute. The tool call itself was still the trigger the code was actually watching for, so the system prompt only needed fixing for reliability (getting the model to call the tool immediately instead of improvising its own confirmation dialog), not for safety.
+
+**Why a signed token instead of, say, a server-side "pending action" session:** the token *is* the pending action — `{user_id, tool, arguments}` — signed with the same secret and library (`golang-jwt/jwt/v5`) as login JWTs, 5-minute expiry. `POST /chat/confirm` executes exactly the tool and arguments inside the token, never anything derived from the confirm request's own body, so there's no window between "user saw $50" and "system executes $500" — and it's stateless, consistent with the rest of this API's JWT-based auth, no session store needed.
+
+**What confirmation is, and isn't:** it's a deliberate-action safeguard — a speed bump against a model (or a user) triggering real money movement by accident or by being talked into it in the middle of an unrelated conversation. It is **not** the authorization boundary — that's [`lookupOwnedAccount`](#mcp-does-not-replace-our-authorization-system) above, which runs unconditionally on every execution regardless of whether confirmation happened. Proof: the cross-user attack above was confirmed with a validly signed token (issued to the real, authenticated attacker) and still failed — confirmation only gates *whether* a proposed action executes, never *whose* accounts it's allowed to touch.
+
+Verified end to end with the real model:
+
+- **Legitimate deposit**: proposed → balance unchanged → confirmed → `$13,974.24 → $13,999.24` (`+$25.00` exactly) → model replies with the new balance.
+- **Legitimate withdrawal**: proposed → confirmed → `$13,999.24 → $13,989.24` (`-$10.00` exactly).
+- **Cross-user transfer attack**: proposed (the preview step doesn't check ownership — it's just describing the request) → confirmed → rejected per the section above, both balances unchanged.
+
 ### Model configuration
 
 The model is swappable without touching any code:
@@ -531,6 +612,8 @@ Verified against the running stack in two passes:
    - An unrelated question (`"¿Qué es TigerBeetle?"`) gets a normal answer without spuriously invoking a tool.
 
    Two things had to change from the original plan to get this far: `anthropic/claude-3.5-sonnet` (the example model in this README and `.env.example`) has been retired from OpenRouter's catalog, and the account's testing key had no purchased credits — both blocked every paid model. Testing landed on the free tier (`openai/gpt-oss-20b:free`) instead, which supports tool calling and worked correctly. `OPENROUTER_MODEL` is still just a `.env` value — swapping to any current OpenRouter model id (paid or free, check `https://openrouter.ai/models`) needs no code change, exactly as designed.
+
+The financial-action tools (`deposit`, `withdraw`, `transfer`) — including the cross-user attack attempt and the confirmation flow — were verified separately; see [MCP Does Not Replace Our Authorization System](#mcp-does-not-replace-our-authorization-system) and [Financial Actions Require Confirmation](#financial-actions-require-confirmation) above for those results.
 
 ## Environment Variables
 
