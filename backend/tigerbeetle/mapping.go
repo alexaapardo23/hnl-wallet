@@ -44,7 +44,7 @@ func ParseUUIDString(s string) (tb.Uint128, error) {
 // Account codes. Ledger 700 is the single USD ledger (see README), so
 // account_type is what code distinguishes between accounts on that ledger.
 const (
-	CodeSystem     uint16 = 1  // SystemAccountID only
+	CodeSystem     uint16 = 1 // SystemAccountID only
 	CodeChecking   uint16 = 10
 	CodeSavings    uint16 = 11
 	CodeInvestment uint16 = 12
@@ -105,4 +105,14 @@ const (
 	// CreditAccountID the account being funded, so SystemAccountID's
 	// DebitsPosted accumulates to sum(initial_balance) across all accounts.
 	CodeInitialBalance uint16 = 100
+
+	// The following mark historical transactions imported from
+	// data/data.json (see cmd/seed-transactions). In every case,
+	// DebitAccountID is where the money leaves from and CreditAccountID is
+	// where it arrives — matching the convention already established by
+	// CodeInitialBalance, where crediting an account increases its balance.
+	CodeDeposit          uint16 = 101 // EXTERNAL (SystemAccountID) -> account
+	CodeWithdrawal       uint16 = 102 // account -> EXTERNAL (SystemAccountID)
+	CodeTransfer         uint16 = 103 // account -> another user's account
+	CodeInternalTransfer uint16 = 104 // account -> the same user's other account
 )

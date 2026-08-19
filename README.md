@@ -198,6 +198,28 @@ TigerBeetle balance
 - Because every funding transfer debits `SystemAccountID` and credits the real account, **`SystemAccountID`'s `DebitsPosted` accumulates to exactly `Σ initial_balance`** across all accounts — verified: `$40,173,713.36`, matching the [Balance Reconciliation](#balance-reconciliation-initial_balance-vs-transactions) total computed from `data.json` alone.
 - Implemented in [`cmd/seed-initial-balances`](backend/cmd/seed-initial-balances/main.go), run after both `cmd/seed` and `cmd/seed-tigerbeetle`.
 
+### Historical Transaction Import
+
+`data/data.json`'s 6429 transactions are replayed into TigerBeetle as transfers by [`cmd/seed-transactions`](backend/cmd/seed-transactions/main.go), one transfer per transaction, using the same debit-leaves/credit-arrives convention as [Initial Balance Funding](#initial-balance-funding):
+
+| `type` | `DebitAccountID` | `CreditAccountID` | Transfer `Code` |
+|---|---|---|---|
+| `deposit` | `SystemAccountID` (`EXTERNAL`) | destination account | `101` (`CodeDeposit`) |
+| `withdrawal` | source account | `SystemAccountID` (`EXTERNAL`) | `102` (`CodeWithdrawal`) |
+| `transfer` | source account | destination account | `103` (`CodeTransfer`) |
+| `internal_transfer` | source account | destination account | `104` (`CodeInternalTransfer`) |
+
+These codes continue the reserved range started by `CodeInitialBalance` (`100`), so every transfer in the system carries a code that identifies its origin at a glance.
+
+**Verification — `initial_balance + historical activity = current ledger balance`:**
+
+For every one of the 1605 accounts, TigerBeetle's actual ledger balance (`CreditsPosted - DebitsPosted`) was compared against `calculated_balance` — the same formula from [Balance Reconciliation](#balance-reconciliation-initial_balance-vs-transactions), computed independently from `data.json` alone:
+
+- **0 mismatches** across all 1605 accounts.
+- Both sides sum to exactly **$40,364,992.41**.
+- `SystemAccountID`'s net balance (`CreditsPosted - DebitsPosted`) is exactly **-$40,364,992.41** — the mirror image of the accounts' total, as expected in double-entry accounting (every cent credited to a user account was debited from `SystemAccountID`, and vice versa).
+
+This confirms TigerBeetle's ledger — built purely from independent `CreateAccounts`/`CreateTransfers` calls — agrees to the cent with the balance derived by reading `data.json` directly, for every account.
 ### Development Accounts (early manual example — superseded)
 
 Earlier in development, before the [Account ID Mapping](#account-id-mapping) above existed, three accounts were created manually in TigerBeetle to explore the API:
@@ -300,7 +322,7 @@ The dataset does not prevent overdrafts — transaction amounts are not capped b
 
 `data/data.json` intentionally includes 20 pairs of users (40 users total) sharing the same email address, each with their own accounts and transaction history. See [Authentication](#authentication) for how this is handled.
 
-Seeding is a three-step process:
+Seeding is a four-step process:
 
 ```bash
 # 1. PostgreSQL: users, accounts (with their tigerbeetle_account_id mapping), transactions
@@ -313,6 +335,10 @@ go run ./cmd/seed-tigerbeetle
 # 3. TigerBeetle: one INITIAL FUNDING transfer per account, posting its
 #    initial_balance — see Initial Balance Funding.
 go run ./cmd/seed-initial-balances
+
+# 4. TigerBeetle: replay data.json's 6429 transactions as transfers —
+#    see Historical Transaction Import.
+go run ./cmd/seed-transactions
 ```
 
-After all three steps, TigerBeetle account balances reflect `initial_balance`, but not yet the 6429 transactions in `data/data.json` — replaying those as TigerBeetle transfers is not implemented yet.
+After all four steps, TigerBeetle account balances fully reflect both `initial_balance` and the entire transaction history in `data/data.json` — verified exactly against the `calculated_balance` formula from [Balance Reconciliation](#balance-reconciliation-initial_balance-vs-transactions), see [Historical Transaction Import](#historical-transaction-import).
