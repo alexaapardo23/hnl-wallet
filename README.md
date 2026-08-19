@@ -274,6 +274,50 @@ backend/
 
 ## Frontend
 
+React + Vite (JavaScript, not TypeScript).
+
+```text
+frontend/
+├── src/
+│   ├── components/   # small reusable UI (Button, TextField, Alert, ProtectedRoute...)
+│   ├── pages/         # one file per route (Login, Dashboard, ...)
+│   ├── services/      # API client (services/api.js)
+│   ├── hooks/         # useAuth, ...
+│   ├── types/         # JSDoc typedefs for API response shapes
+│   ├── context/       # AuthContext (session state)
+│   ├── App.jsx         # routes
+│   └── main.jsx         # providers (BrowserRouter, AuthProvider) + mount
+├── package.json
+└── vite.config.js
+```
+
+### Login
+
+`/login` — email, password, a Login button, inline error display, and a loading state on submit:
+
+```text
+Login
+  ↓
+POST /auth/login
+  ↓
+JWT
+  ↓
+guardar sesión
+  ↓
+Dashboard
+```
+
+- `AuthContext` ([`src/context/AuthContext.jsx`](frontend/src/context/AuthContext.jsx)) holds `token` + `user`, persists the JWT to `localStorage`, and — on every page load where a token is already stored — re-validates it with `GET /me` before treating the session as live (a token that's expired or been invalidated server-side gets dropped, not trusted blindly).
+- `ProtectedRoute` ([`src/components/ProtectedRoute.jsx`](frontend/src/components/ProtectedRoute.jsx)) redirects to `/login` when there's no token, and shows a spinner while that initial `GET /me` check is in flight.
+- The login form only takes `email` + `password`, matching what was asked for — it doesn't expose `account_number`. Logging in with one of the seed's 20 duplicate-email accounts (see [Login and Duplicate Emails](#login-and-duplicate-emails)) therefore surfaces the API's own disambiguation error directly (*"multiple accounts share this email; account_number is required to log in"*) rather than silently failing.
+- `Dashboard` ([`src/pages/Dashboard.jsx`](frontend/src/pages/Dashboard.jsx)) is intentionally minimal at this stage — a welcome message (from the freshly-fetched `GET /me`, not just whatever `POST /auth/login` returned) and a logout button — confirming the session actually works end to end. The real accounts/balances dashboard is separate, follow-up work.
+
+Verified in a real browser against the running API: successful login for a non-duplicate seed user redirects to `/dashboard` and renders the correct name/email; the ambiguous-email error, and a wrong-password error, both render inline on `/login`; the session survives a full page reload (re-validated via `GET /me`); logout clears it; and visiting `/dashboard` directly with no session redirects to `/login`.
+
+### Talking to the API from the browser
+
+The frontend (Vite's dev server, `http://localhost:5173` by default) and the API (`http://localhost:8080`) are different origins, so the API needs to explicitly allow the browser to call it — see [`backend/api/cors.go`](backend/api/cors.go) and the `FRONTEND_URL` environment variable below.
+
 ## Database Schema
 
 ### Identity Model
@@ -625,16 +669,36 @@ Copy [`.env.example`](.env.example) to `.env` (git-ignored) and fill it in. All 
 | `DATA_FILE` | all `cmd/seed*` | Path to `data/data.json` |
 | `JWT_SECRET` | server | HMAC secret used to sign/verify login JWTs — the server refuses to start without it |
 | `OPENROUTER_API_KEY` | server | Enables `POST /chat` when set; leave empty to disable chat only |
-| `OPENROUTER_MODEL` | server | e.g. `anthropic/claude-3.5-sonnet` — required if `OPENROUTER_API_KEY` is set |
+| `OPENROUTER_MODEL` | server | e.g. `openai/gpt-oss-20b:free` — required if `OPENROUTER_API_KEY` is set — see `https://openrouter.ai/models` |
 | `MCP_SERVER_URL` | server | Where the server reaches `cmd/mcp-server`, default `http://localhost:8081/mcp` |
 | `HNL_API_URL` | `cmd/mcp-server` | Where `cmd/mcp-server` reaches the main API, default `http://localhost:8080` |
 | `MCP_SERVER_PORT` | `cmd/mcp-server` | Default `8081` |
+| `FRONTEND_URL` | server | Origin allowed to call the API from a browser (CORS), default `http://localhost:5173` |
 
 TigerBeetle's address (`127.0.0.1:3000`) is currently hardcoded in [`tigerbeetle.NewClient`](backend/tigerbeetle/client.go) rather than read from the environment.
+
+`frontend/` has its own [`.env.example`](frontend/.env.example) (copy to `frontend/.env`), read by Vite — just `VITE_API_URL`, default `http://localhost:8080`.
 
 ## Testing
 
 ## Running the Application
+
+```bash
+# 1. Infrastructure
+docker compose up -d
+
+# 2. Backend (from backend/)
+go run .
+
+# 3. MCP server, if you want chat (from backend/)
+go run ./cmd/mcp-server
+
+# 4. Frontend (from frontend/)
+npm install   # first time only
+npm run dev
+```
+
+Open the URL Vite prints (`http://localhost:5173` by default).
 
 ## Seed Data
 

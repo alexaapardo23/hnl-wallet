@@ -42,6 +42,11 @@ func main() {
 		mcpServerURL = "http://localhost:8081/mcp"
 	}
 
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:5173"
+	}
+
 	var openRouterClient *openrouter.Client
 	if apiKey := os.Getenv("OPENROUTER_API_KEY"); apiKey != "" {
 		model := os.Getenv("OPENROUTER_MODEL")
@@ -55,11 +60,12 @@ func main() {
 	}
 
 	server := &api.Server{
-		DB:           db,
-		TB:           tb,
-		JWTSecret:    []byte(jwtSecret),
-		OpenRouter:   openRouterClient,
-		MCPServerURL: mcpServerURL,
+		DB:            db,
+		TB:            tb,
+		JWTSecret:     []byte(jwtSecret),
+		OpenRouter:    openRouterClient,
+		MCPServerURL:  mcpServerURL,
+		AllowedOrigin: frontendURL,
 	}
 
 	log.Println("HNL Wallet API running on :8080")

@@ -20,6 +20,10 @@ type Server struct {
 	// disabled but the rest of the API is unaffected.
 	OpenRouter   *openrouter.Client
 	MCPServerURL string
+
+	// AllowedOrigin is the frontend origin allowed to call this API from a
+	// browser (see cors.go).
+	AllowedOrigin string
 }
 
 func NewRouter(s *Server) http.Handler {
@@ -44,7 +48,7 @@ func NewRouter(s *Server) http.Handler {
 	mux.Handle("POST /chat", s.requireAuth(http.HandlerFunc(s.chatHandler)))
 	mux.Handle("POST /chat/confirm", s.requireAuth(http.HandlerFunc(s.chatConfirmHandler)))
 
-	return mux
+	return withCORS(s.AllowedOrigin, mux)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
