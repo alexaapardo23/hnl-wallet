@@ -115,7 +115,7 @@ This same `io_uring` requirement applies to TigerBeetle's Go *client*, not just 
 
 ### First-time setup: formatting the data file
 
-TigerBeetle's data file has to be formatted once, before its first `start`, or `start` fails against it. `docker-compose.yml`'s `tigerbeetle` service handles this itself — its `command` is a small shell script (`if [ ! -f /data/0.tigerbeetle ]; then tigerbeetle format ...; fi; exec tigerbeetle start ...`) that formats only when the file doesn't exist yet, then starts — so plain `docker compose up` works both the very first time and on every later run, with no manual step. If you're running TigerBeetle outside Docker (or want to run the check yourself), the equivalent manual command is:
+TigerBeetle's data file has to be formatted once, before its first `start`, or `start` fails against it. `docker-compose.yml`'s `tigerbeetle` service handles this itself via [`backend/scripts/init-tigerbeetle.sh`](backend/scripts/init-tigerbeetle.sh) — mounted in as its entrypoint script — which formats only when the file doesn't exist yet, then starts — so plain `docker compose up` works both the very first time and on every later run, with no manual step. If you're running TigerBeetle outside Docker (or want to run the check yourself), the equivalent manual command is:
 
 ```bash
 tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0.tigerbeetle

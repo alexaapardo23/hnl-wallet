@@ -25,26 +25,18 @@ services:
     # TigerBeetle's data file must be formatted once, before the first
     # `start`, or `start` fails against it. Rather than requiring that as
     # a manual step before `docker compose up` (see README TigerBeetle),
-    # the entrypoint formats it here if it doesn't exist yet, then starts
-    # — a no-op format check on every later boot, since the file persists
-    # in the tigerbeetle_data volume.
+    # backend/scripts/init-tigerbeetle.sh formats it here if it doesn't
+    # exist yet, then starts it.
     # Keeps the image's own tini (PID 1 / signal reaping) ahead of our sh
     # wrapper — see `docker inspect ...tigerbeetle --format
     # '{{.Config.Entrypoint}}'` (["tini", "--", "/tigerbeetle"]) for the
     # default this replaces.
-    entrypoint: ["tini", "--", "sh", "-c"]
-    command:
-      - |
-        set -e
-        if [ ! -f /data/0.tigerbeetle ]; then
-          echo "Formatting TigerBeetle data file..."
-          /tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0.tigerbeetle
-        fi
-        exec /tigerbeetle start --addresses=0.0.0.0:3000 /data/0.tigerbeetle
+    entrypoint: ["tini", "--", "sh", "/init-tigerbeetle.sh"]
     ports:
       - "3000:3000"
     volumes:
       - tigerbeetle_data:/data
+      - ./backend/scripts/init-tigerbeetle.sh:/init-tigerbeetle.sh:ro
     security_opt:
       - seccomp=unconfined
 
