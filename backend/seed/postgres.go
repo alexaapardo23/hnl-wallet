@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"hnl-wallet/backend/models"
+	"hnl-wallet/backend/tigerbeetle"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -49,7 +50,13 @@ func SeedPostgres(ctx context.Context, pool *pgxpool.Pool, data *models.Data) er
 	}
 
 	// Accounts
-	for _, account := range data.Accounts {
+	//
+	// Each account is assigned a deterministic TigerBeetle account ID based
+	// on its position in the seed dataset. ID 1 is reserved for
+	// tigerbeetle.SystemAccountID, so real accounts start at 2.
+	for i, account := range data.Accounts {
+		tigerbeetleAccountID := tigerbeetle.UUIDString(tigerbeetle.AccountID(i))
+
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -58,9 +65,10 @@ func SeedPostgres(ctx context.Context, pool *pgxpool.Pool, data *models.Data) er
 				user_id,
 				initial_balance,
 				currency,
-				account_type
+				account_type,
+				tigerbeetle_account_id
 			)
-			VALUES ($1, $2, $3, $4, $5)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (account_number) DO NOTHING
 			`,
 			account.AccountNumber,
@@ -68,6 +76,7 @@ func SeedPostgres(ctx context.Context, pool *pgxpool.Pool, data *models.Data) er
 			account.InitialBalance,
 			account.Currency,
 			account.AccountType,
+			tigerbeetleAccountID,
 		)
 
 		if err != nil {
