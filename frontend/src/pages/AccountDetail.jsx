@@ -26,15 +26,41 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
   signDisplay: "never",
 });
 
-const dateFormatter = new Intl.DateTimeFormat("es-ES", {
-  day: "2-digit",
+const dateFormatter = new Intl.DateTimeFormat("en-US", {
   month: "short",
-  hour: "2-digit",
-  minute: "2-digit",
+  day: "numeric",
 });
 
 function maskAccountNumber(accountNumber) {
   return `•••• ${accountNumber.slice(-4)}`;
+}
+
+// There's no free-text memo on a transaction — TigerBeetle transfers don't
+// carry one (see README Historical Transaction Import) — so "description"
+// is built entirely from fields the API already returns: type, direction,
+// and counterparty_account_number. Never fabricated placeholder text.
+function describeTransaction(tx) {
+  const counterparty =
+    tx.counterparty_account_number === "EXTERNAL"
+      ? "external"
+      : maskAccountNumber(tx.counterparty_account_number);
+
+  switch (tx.type) {
+    case "deposit":
+      return `From ${counterparty}`;
+    case "withdrawal":
+      return `To ${counterparty}`;
+    case "transfer":
+      return tx.direction === "incoming" ? `From ${counterparty}` : `To ${counterparty}`;
+    case "internal_transfer":
+      return tx.direction === "incoming"
+        ? `From your ${counterparty}`
+        : `To your ${counterparty}`;
+    case "initial_balance":
+      return "Initial funding";
+    default:
+      return counterparty;
+  }
 }
 
 export function AccountDetail() {
@@ -89,38 +115,50 @@ export function AccountDetail() {
         <section className="transactions-section">
           <h2>Recent transactions</h2>
 
-          {loading && (
-            <ul className="transactions-list">
-              {[0, 1, 2].map((i) => (
-                <li key={i} className="transaction-row transaction-row--skeleton" />
-              ))}
-            </ul>
-          )}
+          <div className="transactions-table-wrap">
+            <table className="transactions-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                  <th className="col-amount">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading &&
+                  [0, 1, 2].map((i) => (
+                    <tr key={i} className="transaction-row--skeleton">
+                      <td colSpan={4} />
+                    </tr>
+                  ))}
 
-          {!loading && transactions && (
-            <ul className="transactions-list">
-              {transactions.map((tx) => (
-                <li key={tx.id} className="transaction-row">
-                  <div className="transaction-info">
-                    <span className="transaction-type">
-                      {TRANSACTION_TYPE_LABELS[tx.type] ?? tx.type}
-                    </span>
-                    <span className="transaction-date">{dateFormatter.format(new Date(tx.timestamp))}</span>
-                  </div>
-                  <span
-                    className={`transaction-amount transaction-amount--${tx.direction}`}
-                  >
-                    {tx.direction === "incoming" ? "+" : "-"}
-                    {currencyFormatter.format(tx.amount)}
-                  </span>
-                </li>
-              ))}
+                {!loading &&
+                  transactions &&
+                  transactions.map((tx) => (
+                    <tr key={tx.id}>
+                      <td className="col-date">{dateFormatter.format(new Date(tx.timestamp))}</td>
+                      <td>{TRANSACTION_TYPE_LABELS[tx.type] ?? tx.type}</td>
+                      <td className="col-description">{describeTransaction(tx)}</td>
+                      <td
+                        className={`col-amount transaction-amount transaction-amount--${tx.direction}`}
+                      >
+                        {tx.direction === "incoming" ? "+" : "-"}
+                        {currencyFormatter.format(tx.amount)}
+                      </td>
+                    </tr>
+                  ))}
 
-              {transactions.length === 0 && (
-                <li className="transactions-empty">Sin transacciones todavía.</li>
-              )}
-            </ul>
-          )}
+                {!loading && transactions && transactions.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="transactions-empty">
+                      Sin transacciones todavía.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </section>
       </main>
 

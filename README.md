@@ -361,6 +361,31 @@ Each button opens `OperationModal` ([`src/components/OperationModal.jsx`](fronte
 
 Verified in a real browser against the running API: a $100.00 deposit moved the balance from `$23,503.34` to `$23,603.34` exactly and appeared at the top of the transaction list immediately; a withdrawal for far more than the balance was rejected inline with the API's own `insufficient funds` message, the modal stayed open, and the balance was confirmed unchanged; a $50.00 transfer to another of the same user's accounts moved the balance to `$23,553.34` exactly and was correctly labeled `Internal Transfer` (see [Transfers](#transfers) for why) rather than `Transfer`.
 
+### Transaction History Table
+
+"Recent transactions" on Account Detail renders as a table (Date / Type / Description / Amount), with incoming and outgoing amounts colored distinctly:
+
+```text
+Date    Type        Description         Amount
+Aug 19  Transfer     To your •••• 0799   -$50.00
+Aug 19  Deposit      From external      +$100.00
+Aug 18  Transfer     From •••• 0075     +$723.88
+```
+
+**There is no free-text "description" field anywhere in this system** — TigerBeetle transfers don't carry one (see [Historical Transaction Import](#historical-transaction-import)), unlike `data.json`'s original `description` strings (`"Fondo común"`, `"Pago de gimnasio"`, ...), which live only in PostgreSQL's `transactions` table and were never the source for this endpoint in the first place. So rather than inventing placeholder text to match a mockup showing merchant-style descriptions ("Payment", "Salary", "Purchase"), the Description column is built entirely from fields `GET /accounts/{account_number}/transactions` already returns — `type`, `direction`, and `counterparty_account_number` — in [`describeTransaction`](frontend/src/pages/AccountDetail.jsx):
+
+| `type` | `direction` | Description |
+|---|---|---|
+| `deposit` | incoming | `From external` |
+| `withdrawal` | outgoing | `To external` |
+| `transfer` | incoming / outgoing | `From •••• 0075` / `To •••• 0176` |
+| `internal_transfer` | incoming / outgoing | `From your •••• 0799` / `To your •••• 0799` |
+| `initial_balance` | incoming | `Initial funding` |
+
+Incoming amounts render in the accent color, outgoing in a muted red — reusing the same `transaction-amount--incoming` / `--outgoing` classes from the previous card layout, now applied to table cells instead.
+
+Verified in a real browser: the table correctly rendered a mix of all five transaction kinds for one account, each row's Description matching the rule above (e.g. an `internal_transfer` to the same user's savings account showing `To your •••• 0799`, a `transfer` to a different user showing `To •••• 0176`), amounts colored red for outgoing and teal for incoming, and the newest `deposit`/`internal_transfer` from the previous section's live operations testing appearing correctly at the top.
+
 ### Talking to the API from the browser
 
 The frontend (Vite's dev server, `http://localhost:5173` by default) and the API (`http://localhost:8080`) are different origins, so the API needs to explicitly allow the browser to call it — see [`backend/api/cors.go`](backend/api/cors.go) and the `FRONTEND_URL` environment variable below.
