@@ -5,6 +5,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	tb "github.com/tigerbeetle/tigerbeetle-go"
+
+	"hnl-wallet/backend/openrouter"
 )
 
 // Server holds the dependencies every handler needs.
@@ -12,6 +14,12 @@ type Server struct {
 	DB        *pgxpool.Pool
 	TB        tb.Client
 	JWTSecret []byte
+
+	// OpenRouter and MCPServerURL power POST /chat (see chat.go). OpenRouter
+	// is nil when OPENROUTER_API_KEY isn't set, in which case chat is
+	// disabled but the rest of the API is unaffected.
+	OpenRouter   *openrouter.Client
+	MCPServerURL string
 }
 
 func NewRouter(s *Server) http.Handler {
@@ -32,6 +40,9 @@ func NewRouter(s *Server) http.Handler {
 	mux.Handle("POST /accounts/{account_number}/deposit", s.requireAuth(http.HandlerFunc(s.depositHandler)))
 	mux.Handle("POST /accounts/{account_number}/withdraw", s.requireAuth(http.HandlerFunc(s.withdrawHandler)))
 	mux.Handle("POST /transfers", s.requireAuth(http.HandlerFunc(s.transferHandler)))
+
+	mux.Handle("POST /chat", s.requireAuth(http.HandlerFunc(s.chatHandler)))
+	mux.Handle("POST /chat/confirm", s.requireAuth(http.HandlerFunc(s.chatConfirmHandler)))
 
 	return mux
 }

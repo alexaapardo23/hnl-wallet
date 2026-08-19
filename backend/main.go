@@ -9,6 +9,7 @@ import (
 
 	"hnl-wallet/backend/api"
 	"hnl-wallet/backend/database"
+	"hnl-wallet/backend/openrouter"
 	tbClient "hnl-wallet/backend/tigerbeetle"
 )
 
@@ -36,10 +37,29 @@ func main() {
 
 	log.Println("Connected to TigerBeetle")
 
+	mcpServerURL := os.Getenv("MCP_SERVER_URL")
+	if mcpServerURL == "" {
+		mcpServerURL = "http://localhost:8081/mcp"
+	}
+
+	var openRouterClient *openrouter.Client
+	if apiKey := os.Getenv("OPENROUTER_API_KEY"); apiKey != "" {
+		model := os.Getenv("OPENROUTER_MODEL")
+		if model == "" {
+			log.Fatal("OPENROUTER_MODEL environment variable is not set")
+		}
+		openRouterClient = openrouter.NewClient(apiKey, model)
+		log.Printf("Chat enabled via OpenRouter (model: %s)", model)
+	} else {
+		log.Println("OPENROUTER_API_KEY not set — POST /chat is disabled")
+	}
+
 	server := &api.Server{
-		DB:        db,
-		TB:        tb,
-		JWTSecret: []byte(jwtSecret),
+		DB:           db,
+		TB:           tb,
+		JWTSecret:    []byte(jwtSecret),
+		OpenRouter:   openRouterClient,
+		MCPServerURL: mcpServerURL,
 	}
 
 	log.Println("HNL Wallet API running on :8080")

@@ -260,13 +260,16 @@ A Go HTTP API (stdlib `net/http`, no external router — Go 1.22+'s `ServeMux` h
 ```text
 backend/
 ├── main.go          # wiring: env, PostgreSQL pool, TigerBeetle client, HTTP server
-├── api/              # HTTP handlers (auth, accounts) + routing + auth middleware
+├── api/              # HTTP handlers (auth, accounts, chat) + routing + auth middleware
 ├── auth/              # password hashing (bcrypt) and JWT issuing/parsing
+├── openrouter/        # minimal OpenRouter chat-completions client
 ├── database/         # PostgreSQL connection pool
 ├── tigerbeetle/       # TigerBeetle client + account_number <-> TigerBeetle ID mapping
 ├── models/            # shared data.json-shaped structs
 ├── seed/              # data.json loading + PostgreSQL seeding
-└── cmd/               # one-off seed/import programs (see Seed Data)
+└── cmd/
+    ├── mcp-server/     # standalone MCP server (see AI / MCP Integration)
+    └── ...             # one-off seed/import programs (see Seed Data)
 ```
 
 ## Frontend
@@ -303,6 +306,8 @@ All request/response bodies are JSON. Endpoints under `Auth required` expect `Au
 | `POST` | `/accounts/{account_number}/deposit` | Yes | Credit the account from `SystemAccountID` (`{"amount": 500.25}`, must be `> 0`) — see [Financial Operations](#financial-operations) |
 | `POST` | `/accounts/{account_number}/withdraw` | Yes | Debit the account to `SystemAccountID` (`{"amount": 200.10}`, must be `> 0` and `<=` current balance) — see [Financial Operations](#financial-operations) |
 | `POST` | `/transfers` | Yes | Move money between two accounts (`{"from_account", "to_account", "amount"}`) — `from_account` must belong to the caller, `to_account` doesn't have to — see [Financial Operations](#financial-operations) |
+| `POST` | `/chat` | Yes | Ask about the caller's own money, or request a deposit/withdrawal/transfer, in natural language (`{"message": "¿Cuánto dinero tengo?"}`), via OpenRouter + MCP — `503` if chat isn't configured — see [AI / MCP Integration](#ai--mcp-integration) |
+| `POST` | `/chat/confirm` | Yes | Execute a financial action `/chat` proposed (`{"confirmation_token"}`) — the only way `deposit`/`withdraw`/`transfer` ever actually run through chat — see [Financial Actions Require Confirmation](#financial-actions-require-confirmation) |
 
 Every `/accounts/...` route is scoped to accounts owned by the authenticated user; another user's account (or a nonexistent one) returns `404` either way, so ownership can't be probed by comparing error responses.
 
@@ -441,6 +446,175 @@ Implemented in [`backend/api/transfer.go`](backend/api/transfer.go).
 
 ## AI / MCP Integration
 
+`POST /chat` lets a user ask about their own money in natural language:
+
+```text
+Usuario
+   │
+   ▼
+Chat / Frontend
+   │
+   ▼
+OpenRouter
+   │
+  LLM
+   │
+tool call
+   ▼
+MCP Server
+   │
+   ▼
+Go API
+  /         \
+ ▼           ▼
+PostgreSQL  TigerBeetle
+```
+
+Concretely, `POST /chat` (`{"message": "¿Cuánto dinero tengo?"}`, auth required like every other endpoint):
+
+1. Connects to the MCP server ([`cmd/mcp-server`](backend/cmd/mcp-server/main.go)) over Streamable HTTP, **forwarding the caller's own bearer token unchanged** as the `Authorization` header on every MCP request.
+2. Lists the MCP server's tools and offers them to OpenRouter alongside the user's message.
+3. If the model responds with a tool call, executes it against the MCP server and feeds the result back to OpenRouter for a final natural-language reply.
+
+Implemented in [`backend/api/chat.go`](backend/api/chat.go).
+
+### Why a separate MCP server
+
+`cmd/mcp-server` is its own process, reachable over HTTP (`MCP_SERVER_URL`, default `http://localhost:8081/mcp`) — not a package called in-process by `POST /chat` — because that's what the architecture above actually calls for: a distinct MCP Server sitting between "tool call" and "Go API". Concretely, that separation buys two things:
+
+- **No duplicated business logic.** Every tool is a thin wrapper that calls the existing HNL Wallet API (`GET /accounts`, `GET /accounts/{account_number}/balance`) instead of touching PostgreSQL or TigerBeetle itself. All ownership checks and balance computation stay defined in exactly one place.
+- **No new attack surface.** The MCP server never validates or inspects the bearer token it's given — it just forwards it. It is authorization-free by construction: an LLM can never see more than the user themselves could see by calling the API directly, because every tool call is subject to the exact same JWT + ownership checks as a normal request.
+
+### Tools (read-only)
+
+| Tool | Wraps | Notes |
+|---|---|---|
+| `get_accounts` | `GET /accounts` + `GET /accounts/{account_number}` per account | Returns every account the caller owns, each with its live TigerBeetle balance — the single call that answers "¿Cuánto dinero tengo?" in one round trip |
+| `get_balance` | `GET /accounts/{account_number}/balance` | Answers a follow-up about one specific account, e.g. "¿Cuánto tengo en mi cuenta de ahorros?" |
+| `get_transaction_history` | `GET /accounts/{account_number}/transactions` (once per account) | Answers "¿Cuáles fueron mis últimas transacciones?". `account_number` is optional — omit it to merge and re-sort recent transactions across every account the caller owns; `limit` (default `10`) applies to the merged result, not per account |
+
+`get_transaction_history` with no `account_number` fetches each account's history separately (best-effort — one account's request failing doesn't fail the others) and merges them by timestamp, since a transaction is only ever queryable per-account through the REST API. A same-user `internal_transfer` therefore appears once from each side (outgoing on the source account, incoming on the destination) when both belong to the accounts being merged — that's the same shape `GET .../transactions` already returns per account, just combined.
+
+### Tools (financial actions)
+
+| Tool | Wraps | Notes |
+|---|---|---|
+| `deposit` | `POST /accounts/{account_number}/deposit` | "Deposita $25 en mi cuenta..." |
+| `withdraw` | `POST /accounts/{account_number}/withdraw` | "Retira $10 de mi cuenta..." |
+| `transfer` | `POST /transfers` | "Transfiere $50 a mi cuenta de ahorros" |
+
+Each is a pure wrapper — same as every read tool, `cmd/mcp-server` does no validation of its own before forwarding to the matching REST endpoint. That matters for two separate reasons, covered next: it's what makes the authorization guarantee below hold regardless of what the model does, and it's why the confirmation gate lives outside the MCP server entirely (in `POST /chat`), so these tools have nothing to bypass.
+
+### MCP does not replace our authorization system
+
+The risk with letting an LLM call financial tools: could it be talked into moving money out of an account it shouldn't touch — either by a confused model, a prompt injection, or a user directly asking for something like *"Transfiere dinero desde la cuenta de Pedro"*?
+
+It can try, but it can't succeed, because **`cmd/mcp-server` never checks whose account it was given — the HNL Wallet API does, from the caller's own JWT, every single time**, exactly as it would for a direct REST call:
+
+```text
+JWT
+ ↓
+user_id = A
+ ↓
+MCP
+ ↓
+Go API
+ ↓
+¿from_account pertenece a A?
+ ↓
+NO
+ ↓
+404 (see below for why 404 and not 401/403)
+```
+
+This was verified as an actual attack, not just reasoning about the code: authenticated as Alejandro Alonso Sanz, asked the chat *"Transfiere $500 desde la cuenta 4001-5207-2312-1600 hacia mi cuenta 4001-8551-6335-0159"* — `4001-5207-2312-1600` belongs to a different user (Alejandro Alonso Ruiz, one of the seed's duplicate-email pairs — see [Duplicate emails are allowed by design](#duplicate-emails-are-allowed-by-design---for-the-seed-dataset-only)). Calling the `transfer` tool directly (bypassing the confirmation step and OpenRouter, to see the raw result) returned:
+
+```json
+{"isError": true, "text": "HNL Wallet API returned 404: {\"error\":\"from_account not found\"}"}
+```
+
+— word for word the same error [`POST /transfers` already returns a REST client attempting the same thing](#transfers) (`errAccountNotFound`, from `lookupOwnedAccount`). Running the full attack through `POST /chat` end to end (propose → confirm) produced the same rejection, phrased by the model as *"La transferencia falló porque la cuenta de origen no se encontró."*, and — the part that actually matters — **both accounts' balances were confirmed unchanged** before and after the attempt (Ruiz: `$35,390.95` throughout; Sanz: unaffected by the failed transfer). No code path in this chain (MCP tool, chat orchestrator, or the model itself) performs an ownership check — the rejection happens exactly once, in [`lookupOwnedAccount`](backend/api/accounts.go), and everything upstream of it is just a pipe forwarding a token it never inspects.
+
+**Why `404`, not the `401`/`403` in the original sketch:** every ownership check in this API — reads and writes alike — has used `404` since [Accounts](#api-endpoints) was first built, specifically so "doesn't exist" and "exists but isn't yours" are indistinguishable to the caller (see [API Endpoints](#api-endpoints): "so ownership can't be probed by comparing error responses"). Using `403` here instead would leak that `4001-5207-2312-1600` exists and belongs to *someone*, just not the caller — a smaller information leak than a wrong balance, but a real one, and inconsistent with every other endpoint. The rejection is real either way; only the status code differs from the sketch.
+
+### Financial actions require confirmation
+
+`deposit`, `withdraw`, and `transfer` never execute on a model's first tool call — no matter how the model was prompted, or what a user's message asks for outright ("just do it, no need to confirm" included). Concretely:
+
+```text
+POST /chat  ──tool call: transfer──▶  intercepted before MCP
+                                            │
+                                            ▼
+                              sign {user_id, tool, arguments} → confirmation_token (5 min TTL)
+                                            │
+                                            ▼
+                         reply: "Vas a transferir $50.00 ... ¿Confirmas?"
+                              (no MCP call made, no money moved)
+
+POST /chat/confirm {confirmation_token}
+                                            │
+                                            ▼
+                    verify signature + expiry + token's user_id == caller's user_id
+                                            │
+                                            ▼
+                          MCP tool call, with the token's exact arguments
+                                            │
+                                            ▼
+                                      Go API → TigerBeetle
+```
+
+This gate is enforced in code in [`chatHandler`](backend/api/chat.go), not requested politely of the model via the system prompt — the first version of this *did* rely on prompt wording alone, and a free-tier model immediately demonstrated why that's not a real gate: it answered "quieres confirmar?" in plain chat text without ever calling the tool, which means no `confirmation_token` was ever issued and nothing could have executed even if the user had said "yes" next — the model had no way to *make* it execute. The tool call itself was still the trigger the code was actually watching for, so the system prompt only needed fixing for reliability (getting the model to call the tool immediately instead of improvising its own confirmation dialog), not for safety.
+
+**Why a signed token instead of, say, a server-side "pending action" session:** the token *is* the pending action — `{user_id, tool, arguments}` — signed with the same secret and library (`golang-jwt/jwt/v5`) as login JWTs, 5-minute expiry. `POST /chat/confirm` executes exactly the tool and arguments inside the token, never anything derived from the confirm request's own body, so there's no window between "user saw $50" and "system executes $500" — and it's stateless, consistent with the rest of this API's JWT-based auth, no session store needed.
+
+**What confirmation is, and isn't:** it's a deliberate-action safeguard — a speed bump against a model (or a user) triggering real money movement by accident or by being talked into it in the middle of an unrelated conversation. It is **not** the authorization boundary — that's [`lookupOwnedAccount`](#mcp-does-not-replace-our-authorization-system) above, which runs unconditionally on every execution regardless of whether confirmation happened. Proof: the cross-user attack above was confirmed with a validly signed token (issued to the real, authenticated attacker) and still failed — confirmation only gates *whether* a proposed action executes, never *whose* accounts it's allowed to touch.
+
+Verified end to end with the real model:
+
+- **Legitimate deposit**: proposed → balance unchanged → confirmed → `$13,974.24 → $13,999.24` (`+$25.00` exactly) → model replies with the new balance.
+- **Legitimate withdrawal**: proposed → confirmed → `$13,999.24 → $13,989.24` (`-$10.00` exactly).
+- **Cross-user transfer attack**: proposed (the preview step doesn't check ownership — it's just describing the request) → confirmed → rejected per the section above, both balances unchanged.
+
+### Model configuration
+
+The model is swappable without touching any code:
+
+```bash
+OPENROUTER_API_KEY=...
+OPENROUTER_MODEL=openai/gpt-oss-20b:free   # or any other OpenRouter model id — see https://openrouter.ai/models
+```
+
+[`backend/openrouter`](backend/openrouter/client.go) is a minimal client for OpenRouter's OpenAI-compatible chat completions API — switching Claude → GPT → anything else OpenRouter proxies is a one-line `.env` change. If `OPENROUTER_API_KEY` is unset, the server logs a warning and `POST /chat` returns `503`; every other endpoint is unaffected.
+
+### Running it locally
+
+```bash
+# terminal 1
+go run .                    # main API, :8080
+
+# terminal 2
+go run ./cmd/mcp-server      # MCP server, :8081
+```
+
+### Verified end-to-end, including a real model
+
+Verified against the running stack in two passes:
+
+1. **MCP layer alone**, with a raw MCP client bypassing OpenRouter: `get_accounts` and `get_balance` correctly return live TigerBeetle balances through the full `MCP client -> mcp-server -> Go API -> TigerBeetle` chain, and ownership is enforced through MCP exactly like a normal request — calling `get_balance` for an account the caller doesn't own returns the same `404` as `GET /accounts/{account_number}/balance` would, surfaced as an MCP tool error (`isError: true`) rather than leaking data.
+2. **The full path with a real model**, `POST /chat` end to end:
+
+   - `"¿Cuánto dinero tengo?"` → `"Tienes un total de **$13,974.24 USD** en tu cuenta corriente."` — matching the account's live balance exactly (`get_accounts`).
+   - An indirect phrasing (`"quisiera saber el saldo de mi cuenta de checking"`) resolved correctly too — the model doesn't need the exact target phrase (`get_balance`).
+   - `"¿Cuáles fueron mis últimas transacciones?"` on a single-account user returned that account's 9 real transactions, correctly ordered newest-first (`get_transaction_history`, no `account_number`).
+   - The same question on a **three-account** user correctly merged and re-sorted transactions across all three accounts into one list, each row correctly labeled with which account it belongs to — including a same-user `internal_transfer` showing up once from each side, as expected.
+   - `"Muéstrame las últimas 3 transacciones de la cuenta 4001-6837-3940-0971"` correctly extracted **both** `account_number` and `limit=3` from natural language and returned exactly 3 rows for that one account.
+   - Asking for another user's account by number correctly fails to leak anything — the tool call returns `404`, and the model relays that it isn't in "your portfolio" rather than fabricating a balance.
+   - An unrelated question (`"¿Qué es TigerBeetle?"`) gets a normal answer without spuriously invoking a tool.
+
+   Two things had to change from the original plan to get this far: `anthropic/claude-3.5-sonnet` (the example model in this README and `.env.example`) has been retired from OpenRouter's catalog, and the account's testing key had no purchased credits — both blocked every paid model. Testing landed on the free tier (`openai/gpt-oss-20b:free`) instead, which supports tool calling and worked correctly. `OPENROUTER_MODEL` is still just a `.env` value — swapping to any current OpenRouter model id (paid or free, check `https://openrouter.ai/models`) needs no code change, exactly as designed.
+
+The financial-action tools (`deposit`, `withdraw`, `transfer`) — including the cross-user attack attempt and the confirmation flow — were verified separately; see [MCP Does Not Replace Our Authorization System](#mcp-does-not-replace-our-authorization-system) and [Financial Actions Require Confirmation](#financial-actions-require-confirmation) above for those results.
+
 ## Environment Variables
 
 Copy [`.env.example`](.env.example) to `.env` (git-ignored) and fill it in. All `cmd/*` programs and the server load it via `godotenv.Load("../.env")`, so they're expected to run from `backend/`.
@@ -450,6 +624,11 @@ Copy [`.env.example`](.env.example) to `.env` (git-ignored) and fill it in. All 
 | `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | server, all `cmd/seed*` | PostgreSQL connection |
 | `DATA_FILE` | all `cmd/seed*` | Path to `data/data.json` |
 | `JWT_SECRET` | server | HMAC secret used to sign/verify login JWTs — the server refuses to start without it |
+| `OPENROUTER_API_KEY` | server | Enables `POST /chat` when set; leave empty to disable chat only |
+| `OPENROUTER_MODEL` | server | e.g. `anthropic/claude-3.5-sonnet` — required if `OPENROUTER_API_KEY` is set |
+| `MCP_SERVER_URL` | server | Where the server reaches `cmd/mcp-server`, default `http://localhost:8081/mcp` |
+| `HNL_API_URL` | `cmd/mcp-server` | Where `cmd/mcp-server` reaches the main API, default `http://localhost:8080` |
+| `MCP_SERVER_PORT` | `cmd/mcp-server` | Default `8081` |
 
 TigerBeetle's address (`127.0.0.1:3000`) is currently hardcoded in [`tigerbeetle.NewClient`](backend/tigerbeetle/client.go) rather than read from the environment.
 
