@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useAccountDetail } from "../hooks/useAccountDetail";
 import { OperationModal } from "../components/OperationModal";
@@ -67,6 +67,17 @@ export function AccountDetail() {
   const { accountNumber } = useParams();
   const { account, transactions, loading, error, reload } = useAccountDetail(accountNumber);
   const [activeOperation, setActiveOperation] = useState(null);
+  // Masked by default (matches the Dashboard list), but the user is
+  // already looking at this one specific account on purpose here — e.g.
+  // to read out or copy the full number for someone sending them a
+  // transfer — so unlike the Dashboard, it needs to be revealable.
+  const [numberRevealed, setNumberRevealed] = useState(false);
+
+  // React Router reuses this component when navigating between two
+  // /accounts/:accountNumber URLs (same route, different param) rather
+  // than remounting it — without this, revealing one account's number and
+  // then navigating to another would show the new one already revealed.
+  useEffect(() => setNumberRevealed(false), [accountNumber]);
 
   return (
     <div className="account-detail-page">
@@ -93,7 +104,17 @@ export function AccountDetail() {
             <p className="account-summary-type">
               {ACCOUNT_TYPE_LABELS[account.account_type] ?? account.account_type}
             </p>
-            <p className="account-summary-number">{maskAccountNumber(account.account_number)}</p>
+            <button
+              type="button"
+              className="account-summary-number"
+              onClick={() => setNumberRevealed((prev) => !prev)}
+              aria-label={numberRevealed ? "Ocultar número de cuenta" : "Ver número de cuenta completo"}
+            >
+              {numberRevealed ? account.account_number : maskAccountNumber(account.account_number)}
+              <span className="account-summary-number-hint">
+                {numberRevealed ? "Ocultar" : "Ver completo"}
+              </span>
+            </button>
             <p className="account-summary-balance">
               {currencyFormatter.format(account.balance)} {account.currency}
             </p>
