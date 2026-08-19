@@ -40,10 +40,28 @@ The main architectural principle is that PostgreSQL manages application and user
 ```text
 hnl-wallet/
 ├── backend/
+│   ├── cmd/
+│   │   ├── api/
+│   │   ├── mcp-server/
+│   │   ├── seed/
+│   │   └── ...
+│   ├── database/
+│   ├── models/
+│   ├── ...
+│   ├── Dockerfile
+│   └── go.mod
+│
 ├── frontend/
+│   ├── src/
+│   ├── Dockerfile
+│   └── ...
+│
 ├── data/
+│   └── data.json
+│
 ├── docker-compose.yml
 ├── .env
+├── .env.example
 ├── .gitignore
 └── README.md
 ```
@@ -91,6 +109,16 @@ TigerBeetle requires `io_uring` for its storage engine. The Docker container use
 ```yaml
 security_opt:
   - seccomp=unconfined
+```
+
+This same `io_uring` requirement applies to TigerBeetle's Go *client*, not just its server — see [Docker](#docker) for why `backend`'s `api` service needs the identical `security_opt`.
+
+### First-time setup: formatting the data file
+
+TigerBeetle's data file has to be formatted once, before its first `start`, or `start` fails against it. `docker-compose.yml`'s `tigerbeetle` service handles this itself via [`backend/scripts/init-tigerbeetle.sh`](backend/scripts/init-tigerbeetle.sh) — mounted in as its entrypoint script — which formats only when the file doesn't exist yet, then starts — so plain `docker compose up` works both the very first time and on every later run, with no manual step. If you're running TigerBeetle outside Docker (or want to run the check yourself), the equivalent manual command is:
+
+```bash
+tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0.tigerbeetle
 ```
 
 ## Financial Data Model
@@ -255,11 +283,10 @@ The expected services are:
 
 ## Backend
 
-A Go HTTP API (stdlib `net/http`, no external router — Go 1.22+'s `ServeMux` handles method + path patterns natively) backed by PostgreSQL (users/accounts metadata) and TigerBeetle (balances/transfers). Entry point: [`main.go`](backend/main.go); routes are wired in [`api.NewRouter`](backend/api/server.go).
+A Go HTTP API (stdlib `net/http`, no external router — Go 1.22+'s `ServeMux` handles method + path patterns natively) backed by PostgreSQL (users/accounts metadata) and TigerBeetle (balances/transfers). Entry point: [`cmd/api/main.go`](backend/cmd/api/main.go); routes are wired in [`api.NewRouter`](backend/api/server.go).
 
 ```text
 backend/
-├── main.go          # wiring: env, PostgreSQL pool, TigerBeetle client, HTTP server
 ├── api/              # HTTP handlers (auth, accounts, chat) + routing + auth middleware
 ├── auth/              # password hashing (bcrypt) and JWT issuing/parsing
 ├── openrouter/        # minimal OpenRouter chat-completions client
@@ -267,12 +294,194 @@ backend/
 ├── tigerbeetle/       # TigerBeetle client + account_number <-> TigerBeetle ID mapping
 ├── models/            # shared data.json-shaped structs
 ├── seed/              # data.json loading + PostgreSQL seeding
+├── Dockerfile          # builds cmd/api and cmd/mcp-server into one image (see Docker)
 └── cmd/
+    ├── api/            # main API server — wiring: env, PostgreSQL pool, TigerBeetle client, HTTP server
     ├── mcp-server/     # standalone MCP server (see AI / MCP Integration)
     └── ...             # one-off seed/import programs (see Seed Data)
 ```
 
+`cmd/api/main.go` used to live at `backend/main.go` — moved under `cmd/` to match every other entry point in this project (`cmd/mcp-server`, `cmd/seed`, ...) and to give the [Docker](#docker) build a conventional `./cmd/<binary>` target per binary.
+
 ## Frontend
+
+React + Vite (JavaScript, not TypeScript).
+
+```text
+frontend/
+├── src/
+│   ├── components/   # small reusable UI (Button, TextField, Alert, ProtectedRoute...)
+│   ├── pages/         # one file per route (Login, Dashboard, ...)
+│   ├── services/      # API client (services/api.js)
+│   ├── hooks/         # useAuth, ...
+│   ├── types/         # JSDoc typedefs for API response shapes
+│   ├── context/       # AuthContext (session state)
+│   ├── App.jsx         # routes
+│   └── main.jsx         # providers (BrowserRouter, AuthProvider) + mount
+├── package.json
+└── vite.config.js
+```
+
+### Login
+
+`/login` — email, password, a Login button, inline error display, and a loading state on submit:
+
+```text
+Login
+  ↓
+POST /auth/login
+  ↓
+JWT
+  ↓
+guardar sesión
+  ↓
+Dashboard
+```
+
+- `AuthContext` ([`src/context/AuthContext.jsx`](frontend/src/context/AuthContext.jsx)) holds `token` + `user`, persists the JWT to `localStorage`, and — on every page load where a token is already stored — re-validates it with `GET /me` before treating the session as live (a token that's expired or been invalidated server-side gets dropped, not trusted blindly).
+- `ProtectedRoute` ([`src/components/ProtectedRoute.jsx`](frontend/src/components/ProtectedRoute.jsx)) redirects to `/login` when there's no token, and shows a spinner while that initial `GET /me` check is in flight.
+- The login form only takes `email` + `password` at first, matching what was originally asked for — `account_number` starts hidden. **This used to be a dead end**: logging in with one of the seed's 20 duplicate-email accounts (see [Login and Duplicate Emails](#login-and-duplicate-emails)) surfaced the API's own disambiguation error (*"multiple accounts share this email; account_number is required to log in"*) with no way to act on it — there was simply no field to type it into, so those 40 seed users could never actually sign in through the UI even though the API fully supports disambiguating them. Fixed: `Login.jsx` checks the failed login's `ApiError.original` (the API's untranslated error string — matching on the *translated* Spanish text would be fragile if the wording ever changes) against `AMBIGUOUS_EMAIL_ERROR`, and reveals a `Número de cuenta` field the moment it matches, so resubmitting with it filled in reaches the same `POST /auth/login` call, now disambiguated. Changing the email afterward hides the field again, since a different email may not be ambiguous.
+
+Verified in a real browser against the running API: successful login for a non-duplicate seed user redirects to `/dashboard` and renders the correct name/email; a wrong-password error renders inline on `/login`; the session survives a full page reload (re-validated via `GET /me`); logout clears it; visiting `/dashboard` directly with no session redirects to `/login`; and — the fix itself — submitting one of the duplicate-email accounts with no `account_number` revealed the field with the disambiguation error shown, and resubmitting with the correct `account_number` (`4001-8551-6335-0159`) logged in successfully and landed on that exact account's Dashboard.
+
+### Register
+
+`/register` ([`src/pages/Register.jsx`](frontend/src/pages/Register.jsx), linked from `/login` both ways) — full name, email, password, and an account type picker (Corriente/Ahorros/Inversión), one `POST /auth/register` call:
+
+```text
+Register
+  ↓
+POST /auth/register  (crea usuario + cuenta bancaria)
+  ↓
+JWT
+  ↓
+guardar sesión
+  ↓
+Dashboard
+```
+
+`AuthContext.register` ([`src/context/AuthContext.jsx`](frontend/src/context/AuthContext.jsx)) is `login`'s twin — same `{token, user}` handling, same `localStorage` persistence — plus the extra `account` field the register response carries, which the form doesn't need to do anything with itself: landing on `/dashboard` right after already triggers `GET /accounts/summary`, which picks up the new account on its own.
+
+Verified in a real browser against the running API: submitting the form created the user and a real TigerBeetle account together, logged in immediately, and landed on `/dashboard` showing exactly that new account (correct type, `$0.00` balance, matching what was picked in the form); registering the same email again rendered `Este email ya está registrado.` inline, matching `POST /auth/register`'s existing `409` behavior.
+
+### Dashboard
+
+`/dashboard` — total balance, then every account with its own balance and a masked account number:
+
+```text
+┌──────────────────────────────────────────────┐
+│ HNL Wallet                            Teresa │
+├──────────────────────────────────────────────┤
+│ Total Balance                                 │
+│ $76,074.82                                    │
+├──────────────────────────────────────────────┤
+│ My Accounts                                   │
+│ Investment              $23,503.34            │
+│ •••• 0800                                     │
+│ Savings                 $43,629.32            │
+│ •••• 0799                                     │
+│ Checking                 $8,942.16            │
+│ •••• 0798                                     │
+└──────────────────────────────────────────────┘
+```
+
+**The balance comes from the backend/TigerBeetle, never calculated in React.** `useAccountsSummary` ([`src/hooks/useAccountsSummary.js`](frontend/src/hooks/useAccountsSummary.js)) calls the new `GET /accounts/summary` (see [API Endpoints](#api-endpoints) and [`accountsSummaryHandler`](backend/api/accounts.go)), which fetches every account's live balance from TigerBeetle and **sums them into `total_balance` in Go**, not in the browser. `Dashboard.jsx` only ever renders `total_balance` and each `account.balance` exactly as received — it doesn't add, subtract, or derive any of them from `initial_balance` or transaction history itself. This is the same principle as [Balance Reconciliation](#balance-reconciliation-initial_balance-vs-transactions) and every other balance-reading endpoint in this project: TigerBeetle computes it once, on the server, and everything downstream just displays it.
+
+Other details: account numbers are masked to their last 4 digits (`•••• 0800`), `account_type` is title-cased for display (`checking` → `Checking`) without changing what the API returns, and both the balance card and the account list show a skeleton placeholder while `GET /accounts/summary` is in flight rather than a blank page.
+
+Verified in a real browser against the running API, logged in as a real seed user with three accounts (checking, savings, investment): the rendered total and all three per-account balances matched `GET /accounts/summary`'s response exactly (`$76,074.82` total; `$23,503.34` / `$43,629.32` / `$8,942.16` for investment / savings / checking respectively), and the layout was checked at both desktop and mobile viewport widths.
+
+### Account Detail
+
+Clicking an account on the Dashboard opens `/accounts/:accountNumber` ([`src/pages/AccountDetail.jsx`](frontend/src/pages/AccountDetail.jsx)) — account type, masked number, currency, current balance, Deposit/Withdraw/Transfer buttons, and recent transactions:
+
+```text
+Checking
+•••• 0571
+$12,430.00 USD
+[ Deposit ] [ Withdraw ] [ Transfer ]
+Recent transactions
+────────────────────────────
+Deposit              +$500
+Transfer             -$120
+Transfer             +$250
+```
+
+`useAccountDetail` ([`src/hooks/useAccountDetail.js`](frontend/src/hooks/useAccountDetail.js)) fetches `GET /accounts/{account_number}` and `GET /accounts/{account_number}/transactions` together — the same "never compute a balance in React" rule as the Dashboard applies here too: `balance` is rendered exactly as the API returns it, and each transaction's `+`/`-` sign comes directly from the API's own `direction` field (`incoming`/`outgoing`), not from comparing amounts or account numbers client-side.
+
+Each button opens `OperationModal` ([`src/components/OperationModal.jsx`](frontend/src/components/OperationModal.jsx)) — one shared modal for all three operations (amount, plus a destination account field for Transfer only), calling `POST /accounts/{account_number}/deposit`, `.../withdraw`, or `POST /transfers` directly — these are the same endpoints from [Financial Operations](#financial-operations), executed immediately on submit, **not** the signed confirmation-token flow `POST /chat` uses. That flow exists specifically to guard against an LLM triggering money movement on its own initiative mid-conversation; a human directly clicking "Deposit," typing an amount, and clicking submit in a dedicated form *is* the confirmation — there's no third party whose intent needs double-checking. On success, the modal closes and `useAccountDetail`'s `reload()` re-fetches both the account and its transactions, so the new balance shown is freshly read from TigerBeetle, not computed from the pre-operation balance plus the amount.
+
+Verified in a real browser against the running API: a $100.00 deposit moved the balance from `$23,503.34` to `$23,603.34` exactly and appeared at the top of the transaction list immediately; a withdrawal for far more than the balance was rejected inline with the API's own `insufficient funds` message, the modal stayed open, and the balance was confirmed unchanged; a $50.00 transfer to another of the same user's accounts moved the balance to `$23,553.34` exactly and was correctly labeled `Internal Transfer` (see [Transfers](#transfers) for why) rather than `Transfer`.
+
+The masked account number is shown by default — matching the Dashboard's list — but is now a button (`numberRevealed` state in `AccountDetail.jsx`) instead of static text: clicking it toggles between `•••• 1612` and the full `4001-3398-5322-1612`, with the trailing hint switching between "View full" and "Hide" and the button's `aria-label` switching to match. This exists because a user looking at one specific account's detail page is often there specifically to read out or copy the full number for someone sending them a transfer, so masking it with no way to reveal it was a real gap, not just a cosmetic one. The reveal state resets to masked whenever `accountNumber` changes, via a `useEffect` keyed on the route param — React Router reuses this same component across two different `/accounts/:accountNumber` URLs rather than remounting it, so without this a revealed number would otherwise stay revealed after navigating to a different account. Verified in a real browser: clicking the masked number on a running account revealed the full number and hint/aria-label immediately, and clicking again re-masked it — confirmed both directions.
+
+### Transaction History Table
+
+"Recent transactions" on Account Detail renders as a table (Date / Type / Description / Amount), with incoming and outgoing amounts colored distinctly:
+
+```text
+Date    Type        Description         Amount
+Aug 19  Transfer     To your •••• 0799   -$50.00
+Aug 19  Deposit      From external      +$100.00
+Aug 18  Transfer     From •••• 0075     +$723.88
+```
+
+**There is no free-text "description" field anywhere in this system** — TigerBeetle transfers don't carry one (see [Historical Transaction Import](#historical-transaction-import)), unlike `data.json`'s original `description` strings (`"Fondo común"`, `"Pago de gimnasio"`, ...), which live only in PostgreSQL's `transactions` table and were never the source for this endpoint in the first place. So rather than inventing placeholder text to match a mockup showing merchant-style descriptions ("Payment", "Salary", "Purchase"), the Description column is built entirely from fields `GET /accounts/{account_number}/transactions` already returns — `type`, `direction`, and `counterparty_account_number` — in [`describeTransaction`](frontend/src/pages/AccountDetail.jsx):
+
+| `type` | `direction` | Description |
+|---|---|---|
+| `deposit` | incoming | `From external` |
+| `withdrawal` | outgoing | `To external` |
+| `transfer` | incoming / outgoing | `From •••• 0075` / `To •••• 0176` |
+| `internal_transfer` | incoming / outgoing | `From your •••• 0799` / `To your •••• 0799` |
+| `initial_balance` | incoming | `Initial funding` |
+
+Incoming amounts render in the accent color, outgoing in a muted red — reusing the same `transaction-amount--incoming` / `--outgoing` classes from the previous card layout, now applied to table cells instead.
+
+Verified in a real browser: the table correctly rendered a mix of all five transaction kinds for one account, each row's Description matching the rule above (e.g. an `internal_transfer` to the same user's savings account showing `To your •••• 0799`, a `transfer` to a different user showing `To •••• 0176`), amounts colored red for outgoing and teal for incoming, and the newest `deposit`/`internal_transfer` from the previous section's live operations testing appearing correctly at the top.
+
+### Chat
+
+`/chat` ([`src/pages/Chat.jsx`](frontend/src/pages/Chat.jsx), linked from the Dashboard header as "Asistente") is a chat UI over the same path documented in [AI / MCP Integration](#ai--mcp-integration):
+
+```text
+React Chat
+    │  POST /chat
+    ▼
+Go API ──▶ OpenRouter ──tool call──▶ MCP Server :8081 ──▶ Go API ──▶ TigerBeetle / PostgreSQL
+    │                                                                        │
+    └────────────────────────── MCP → OpenRouter → Go API ◀─────────────────┘
+    ▼
+React
+```
+
+`useChat` ([`src/hooks/useChat.js`](frontend/src/hooks/useChat.js)) manages the message list and two calls, `chatService.send`/`chatService.confirm`:
+
+- A read question ("¿Cuánto dinero tengo?") gets a plain assistant bubble.
+- A financial action ("Deposita $50 en mi cuenta") gets an assistant bubble carrying the API's `requires_confirmation` + `confirmation_token`, rendered with a **Confirmar** button instead of executing — nothing has moved yet at this point (see [Financial Actions Require Confirmation](#financial-actions-require-confirmation)). Clicking it calls `POST /chat/confirm` with that exact token; the button is replaced with "Operación enviada." and the real result arrives as a new assistant bubble.
+
+Two things changed in the backend while wiring this up to a real UI instead of `curl`:
+
+- **The confirmation reply text.** It used to end with *"Envía el confirmation_token a POST /chat/confirm para ejecutarlo"* — reasonable instructions for an API consumer, but broken-looking coming from a chat bubble a human is reading. It's now just *"¿Confirmas esta operación?"*; the actual token still travels in the response's `confirmation_token` field, which is what the **Confirmar** button uses — the frontend never parses it out of the reply text.
+- **The system prompt now hardcodes Spanish** (`chatSystemPrompt` in `backend/api/chat.go`) instead of "reply in the same language the user wrote in" — this frontend is Spanish-only (see [Language](#language)), so a dynamically-detected reply language could only ever be wrong for it.
+
+Verified end-to-end in a real browser, backed by the running API, MCP server, and OpenRouter: "¿Cuánto dinero tengo?" rendered the real total across the user's three accounts; "Deposita $50 en mi cuenta 4001-4666-9766-0800" produced a confirmation bubble with a **Confirmar** button and moved no money yet (balance checked via the API: still `$23,553.34`); clicking **Confirmar** executed it and the chat's own follow-up message ("...actualizando el saldo a 23,603.34 USD") matched the account's real new balance exactly. One OpenRouter follow-up call failed transiently mid-testing (`502`, `"Provider returned error"` — a free-tier model instability, not a bug in this code) and rendered the translated `No se pudo conectar con el asistente. Intenta de nuevo.` correctly; retrying the same message immediately succeeded.
+
+**Markdown rendering.** "¿Cuáles fueron mis últimas transacciones?" surfaced a real gap on first test: the model replies with a Markdown table for transaction history (and `**bold**` elsewhere), and the chat was rendering `message.content` as plain text — a user would have seen literal `| Fecha | Tipo | ... |` pipe syntax instead of a table. Fixed by rendering assistant messages (only assistant — the user's own messages stay plain text) through `react-markdown` + `remark-gfm` (for table support), with a custom `table` renderer wrapping it in a horizontally-scrollable container so a wide table can't overflow the page. Verified by inspecting the rendered DOM directly: the reply produced a real `<table>`/`<thead>`/`<tr>`/`<td>` structure, not literal pipe characters, with the CSS (borders, header background, scroll container) correctly applied. This OpenRouter free-tier model was also visibly flaky retrying this exact question (a couple of transient `502`s before a `200`), consistent with the instability noted above rather than anything query-specific.
+
+### Talking to the API from the browser
+
+The frontend (Vite's dev server, `http://localhost:5173` by default) and the API (`http://localhost:8080`) are different origins, so the API needs to explicitly allow the browser to call it — see [`backend/api/cors.go`](backend/api/cors.go) and the `FRONTEND_URL` environment variable below.
+
+### Language
+
+The UI is Spanish throughout — labels, buttons, headers, dates (`19 ago` rather than `Aug 19`), and every error message a user can actually see.
+
+The API itself is English-only (see `backend/api/*.go` — every `writeError` call is a plain English string), so the frontend can't just relay `err.message` and call it done. [`services/api.js`](frontend/src/services/api.js) keeps a translation table (`ERROR_TRANSLATIONS`) covering every error string the endpoints this frontend calls can actually return (login, deposit, withdraw, transfer, account lookups), and `request()` translates through it before the error ever reaches a page or a modal — `Login.jsx`, `OperationModal.jsx`, and `Dashboard.jsx`/`AccountDetail.jsx`'s retry banners all display `err.message` directly and never see the original English. A message the API could return that isn't in the table falls back to the raw English text rather than being hidden — visibly wrong is safer than silently wrong.
+
+Currency amounts are the one thing that stays formatted the US way (`$23,553.34`, comma thousands / period decimal) rather than switching to `es-ES`'s `23.553,34 US$` — every balance verified against the API throughout this README was checked in that format, and it's the standard way USD amounts are usually shown regardless of UI language.
+
+Verified in a real browser: a wrong password renders `Email o contraseña incorrectos.` (translated from the API's `invalid email or password`), and a withdrawal exceeding the balance renders `Fondos insuficientes.` (translated from `insufficient funds`) inline in the modal — confirming the translation layer is actually in the request path, not just present in the source.
 
 ## Database Schema
 
@@ -288,6 +497,8 @@ Users are identified by three distinct attributes, each with a different purpose
 
 `users.email` does **not** have a uniqueness constraint at the database level. This was a deliberate decision — see [Authentication](#authentication) for the reasoning.
 
+The full schema — including `tigerbeetle_account_seq`, the sequence new accounts get their TigerBeetle ID from — lives in [`backend/database/schema.sql`](backend/database/schema.sql), applied automatically the first time `postgres` boots against an empty volume (see [Docker](#docker)). It's kept as a file extracted from the live schema (`pg_dump --schema-only`) rather than hand-maintained separately, so it can't silently drift from what the Go code actually expects.
+
 ## API Endpoints
 
 All request/response bodies are JSON. Endpoints under `Auth required` expect `Authorization: Bearer <token>` (see [Authentication](#authentication)).
@@ -295,11 +506,12 @@ All request/response bodies are JSON. Endpoints under `Auth required` expect `Au
 | Method | Path | Auth required | Description |
 |---|---|---|---|
 | `GET` | `/health` | No | Liveness check |
-| `POST` | `/auth/register` | No | Create a new user — see [New registrations require a unique email](#new-registrations-require-a-unique-email) |
+| `POST` | `/auth/register` | No | Create a user + their first account, and log them in (`{token, user, account}`, same shape as login plus `account`) — see [New registrations require a unique email](#new-registrations-require-a-unique-email) |
 | `POST` | `/auth/login` | No | Authenticate and receive a JWT — see [Login and duplicate emails](#login-and-duplicate-emails) |
 | `GET` | `/me` | Yes | The authenticated user's own profile (`id`, `email`, `full_name`, `created_at`) |
 | `POST` | `/accounts` | Yes | Open a new account (`{"account_type": "checking" \| "savings" \| "investment"}`) for the authenticated user, balance starts at `0` |
 | `GET` | `/accounts` | Yes | List the authenticated user's accounts |
+| `GET` | `/accounts/summary` | Yes | Every account's live balance plus `total_balance` (summed in Go, from those same TigerBeetle-sourced numbers) — powers the frontend [Dashboard](#dashboard) |
 | `GET` | `/accounts/{account_number}` | Yes | PostgreSQL metadata (`account_type`, `currency`, `initial_balance`) plus live `balance` from TigerBeetle, in one call |
 | `GET` | `/accounts/{account_number}/balance` | Yes | Live balance from TigerBeetle only — lighter-weight than the detail endpoint above, for polling |
 | `GET` | `/accounts/{account_number}/transactions` | Yes | Transfer history for the account, newest first (`?limit=`, default `50`, max `200`) — see note below |
@@ -325,7 +537,11 @@ Since `user_id` (not `email`) is the true internal identity, and `account_number
 
 ### New registrations require a unique email
 
-`POST /auth/register` (`{email, password, full_name}`) enforces email uniqueness **at the application layer**, not the database — the database intentionally has no constraint, per the section above. Registration checks for an existing `email` before inserting and returns `409 Conflict` if it's already taken, so **new** users can never end up with a duplicate email, while the legacy seed duplicates remain untouched.
+`POST /auth/register` (`{email, password, full_name, account_type}`) enforces email uniqueness **at the application layer**, not the database — the database intentionally has no constraint, per the section above. Registration checks for an existing `email` before inserting and returns `409 Conflict` if it's already taken, so **new** users can never end up with a duplicate email, while the legacy seed duplicates remain untouched.
+
+**Registration also opens the user's first account and logs them in**, in the same request — `account_type` is required (validated with the same rule as `POST /accounts`, before the user row is even inserted, so a bad value never leaves an accountless user behind) and the response is shaped like `POST /auth/login`'s (`{token, user}`) plus the new `account`, so the frontend goes straight from the registration form to an authenticated Dashboard without a separate login call. Internally, both `POST /accounts` and registration's account-opening step call the same `createAccount` helper ([`backend/api/accounts.go`](backend/api/accounts.go)) — there's only one place that allocates a `tigerbeetle_account_seq` ID, calls `TB.CreateAccounts`, and inserts the PostgreSQL row.
+
+One real gap this closed: the frontend originally only exposed `email` + `password` on `/login` and had no `/register` page at all — so a user could never open a first account through the UI, and (per [Login and duplicate emails](#login-and-duplicate-emails) below) a duplicate-email seed user couldn't log in either, since there was nowhere to type an `account_number`. Both are now fixed: [`Register.jsx`](frontend/src/pages/Register.jsx) (linked from `/login`, and back) collects `full_name`/`email`/`password`/`account_type` and calls `POST /auth/register` directly, and `/login` reveals its `account_number` field on demand (see below).
 
 Passwords are hashed with bcrypt before being stored. Seed users keep their original plaintext passwords (e.g. `"Isabel2024!"`) — [`auth.VerifyPassword`](backend/auth/password.go) detects the bcrypt prefix to compare either form correctly, rather than migrating (and thereby altering) seed data.
 
@@ -590,7 +806,7 @@ OPENROUTER_MODEL=openai/gpt-oss-20b:free   # or any other OpenRouter model id �
 
 ```bash
 # terminal 1
-go run .                    # main API, :8080
+go run ./cmd/api             # main API, :8080
 
 # terminal 2
 go run ./cmd/mcp-server      # MCP server, :8081
@@ -625,22 +841,63 @@ Copy [`.env.example`](.env.example) to `.env` (git-ignored) and fill it in. All 
 | `DATA_FILE` | all `cmd/seed*` | Path to `data/data.json` |
 | `JWT_SECRET` | server | HMAC secret used to sign/verify login JWTs — the server refuses to start without it |
 | `OPENROUTER_API_KEY` | server | Enables `POST /chat` when set; leave empty to disable chat only |
-| `OPENROUTER_MODEL` | server | e.g. `anthropic/claude-3.5-sonnet` — required if `OPENROUTER_API_KEY` is set |
+| `OPENROUTER_MODEL` | server | e.g. `openai/gpt-oss-20b:free` — required if `OPENROUTER_API_KEY` is set — see `https://openrouter.ai/models` |
 | `MCP_SERVER_URL` | server | Where the server reaches `cmd/mcp-server`, default `http://localhost:8081/mcp` |
 | `HNL_API_URL` | `cmd/mcp-server` | Where `cmd/mcp-server` reaches the main API, default `http://localhost:8080` |
 | `MCP_SERVER_PORT` | `cmd/mcp-server` | Default `8081` |
+| `FRONTEND_URL` | server | Origin allowed to call the API from a browser (CORS), default `http://localhost:5173` |
 
-TigerBeetle's address (`127.0.0.1:3000`) is currently hardcoded in [`tigerbeetle.NewClient`](backend/tigerbeetle/client.go) rather than read from the environment.
+`TIGERBEETLE_ADDRESS` is read by [`tigerbeetle.NewClient`](backend/tigerbeetle/client.go), defaulting to `127.0.0.1:3000` when unset (local dev outside Docker); `docker-compose.yml` sets it to `tigerbeetle:3000` for `api` and `seed`.
+
+`frontend/` has its own [`.env.example`](frontend/.env.example) (copy to `frontend/.env`), read by Vite — just `VITE_API_URL`, default `http://localhost:8080`.
 
 ## Testing
 
 ## Running the Application
 
+Two ways to run this. For day-to-day development, run Go and Vite directly — instant rebuilds, no image to rebuild per change:
+
+```bash
+# 1. Infrastructure
+docker compose up -d postgres tigerbeetle
+
+# 2. Backend (from backend/)
+go run ./cmd/api
+
+# 3. MCP server, if you want chat (from backend/)
+go run ./cmd/mcp-server
+
+# 4. Frontend (from frontend/)
+npm install   # first time only
+npm run dev
+```
+
+Open the URL Vite prints (`http://localhost:5173` by default). See [Docker](#docker) below to run the whole stack — API, MCP server, and frontend included — as containers instead.
+
+## Docker
+
+**`docker compose up -d` is the entire setup — nothing else needs to run first.** It builds and runs `postgres` (schema applied automatically from [`backend/database/schema.sql`](backend/database/schema.sql), see [Database Schema](#database-schema)), `tigerbeetle` (data file formatted automatically on first boot, see [TigerBeetle](#tigerbeetle)), `seed` (one-shot: loads `data/data.json` into both databases, see [Seed Data](#seed-data)), `api` ([`backend/Dockerfile`](backend/Dockerfile)), `mcp-server` (same image, different `command:`), and `frontend` ([`frontend/Dockerfile`](frontend/Dockerfile), built and served via nginx). `api`, `mcp-server`, and `frontend` all wait (via `depends_on`) for `seed` to finish successfully before starting, so there's no race against an empty database.
+
+`seed` is safe to leave running on every `docker compose up`, not just the first: it starts with a guard (`cmd/seed-guard`, wired through [`backend/scripts/seed-all.sh`](backend/scripts/seed-all.sh)) that checks whether `users` already has rows and exits immediately if so, skipping the whole pipeline. This matters because re-running the TigerBeetle steps isn't itself safe — `seed-initial-balances`/`seed-transactions` create transfers with random IDs (`tb.ID()`), not ones derived from the source data, so a second unguarded run would double-credit every account rather than being deduplicated the way the Postgres `ON CONFLICT DO NOTHING` inserts are.
+
+Verified against a genuinely clean slate, not just `docker compose config`: `docker compose down -v` (dropping both `postgres_data` and `tigerbeetle_data`), then a plain `docker compose up -d` with no other commands run in between. `seed`'s logs showed all four steps completing (1000 users / 1605 accounts / 6429 transactions into Postgres, 1606 TigerBeetle accounts, 1605 initial-balance transfers, 6429 historical transfers) and exiting 0; `api`, `mcp-server`, and `frontend` all started clean afterward. A registration through the live `api` container worked immediately, and a seed account's balance fetched through the API (`$20,820.67`) matched a balance independently recomputed from `data/data.json` (`initial_balance` plus the net of every transaction touching that account) exactly. Re-running `docker compose up -d --force-recreate seed` against that same, now-seeded volume logged `users table already has 1000 rows — already seeded` and exited 0 without touching either database again.
+
+Two things that only surfaced by actually building and running these images, not from reading the code:
+
+- **`backend/Dockerfile` builds on Debian, not Alpine, on purpose.** TigerBeetle's Go client (`tigerbeetle-go`) links a prebuilt native static library via CGO (see its `native/` directory) — `CGO_ENABLED=0`'s usual "static binary on Alpine" shortcut would break it, and mixing Alpine's musl libc for the runtime stage with a glibc-linked CGO binary from the builder risks a mismatch. Both stages are `bookworm`-based instead. The builder also needs `gcc`/`libc6-dev` installed explicitly — the plain `golang` image doesn't include a C toolchain.
+- **The `api` service needs `security_opt: seccomp=unconfined`, same as `tigerbeetle`.** Not just TigerBeetle's *server* — its Go *client* uses `io_uring` internally too. Without this, `tigerbeetle.NewClient()` doesn't return an error, it crashes the container outright (`error(io): io_uring is not available` / `SIGABRT`) the moment `cmd/api` starts. `mcp-server` doesn't need it — see [MCP Does Not Replace Our Authorization System](#mcp-does-not-replace-our-authorization-system), it never touches TigerBeetle directly, only the `api` container does.
+
+Also relevant: [`tigerbeetle.NewClient`](backend/tigerbeetle/client.go) resolves `TIGERBEETLE_ADDRESS` (e.g. `tigerbeetle:3000`, the Docker service name) to an IP before handing it to the TigerBeetle client — its native `tb_client_init` parses addresses itself and doesn't do DNS resolution, so a hostname that resolves fine everywhere else in Go fails there with `ErrInvalidAddress`. This keeps `TIGERBEETLE_ADDRESS` hostname-friendly like every other `*_URL`/`*_ADDRESS` env var in this project instead of requiring a raw IP.
+
+`frontend/Dockerfile` takes `VITE_API_URL` as a **build** arg, not a runtime env var — Vite bakes `import.meta.env.VITE_*` values into the built JS bundle at `npm run build` time, so pointing a built image at a different API means rebuilding it (`docker build --build-arg VITE_API_URL=... .`, or `build.args` in `docker-compose.yml`), not just changing an environment variable on the running container.
+
+Verified against the running containers, not just `docker compose config`: `POST /auth/login` and `GET /accounts/summary` returned correct, real data through the containerized `api`; the containerized `frontend` served `index.html` (checked `/` and `/dashboard` directly — nginx's `try_files` fallback for React Router); and `POST /chat` completed a full `api → OpenRouter → tool call → mcp-server (container) → api (container) → TigerBeetle (container)` round trip, returning the exact same total (`$76,224.82`) `GET /accounts/summary` reported directly — confirming `mcp-server` correctly reaches `api` over the Docker network (`http://api:8080`) rather than just compiling.
+
 ## Seed Data
 
 `data/data.json` intentionally includes 20 pairs of users (40 users total) sharing the same email address, each with their own accounts and transaction history. See [Authentication](#authentication) for how this is handled.
 
-Seeding is a four-step process:
+**Via Docker, this is fully automatic** — `docker compose up -d` runs all four steps below through the one-shot `seed` service ([`backend/scripts/seed-all.sh`](backend/scripts/seed-all.sh)), gated by `cmd/seed-guard` so it only runs once per volume. See [Docker](#docker) for the verified end-to-end run. What follows is the same four-step process run manually, for local development without Docker (`go run ./cmd/api` etc., see [Running the Application](#running-the-application)):
 
 ```bash
 # 1. PostgreSQL: users, accounts (with their tigerbeetle_account_id mapping), transactions

@@ -27,12 +27,6 @@ type accountResponse struct {
 }
 
 // createAccountHandler opens a new account for the authenticated user.
-//
-// account_number and the TigerBeetle account ID are both drawn from
-// tigerbeetle_account_seq (starting at 1607, right after the 1605 seeded
-// accounts occupying IDs 2..1606 — see README Account ID Mapping), keeping
-// every account's ID small and human-readable instead of switching to
-// TigerBeetle's random ID() generator only for accounts created here.
 func (s *Server) createAccountHandler(w http.ResponseWriter, r *http.Request) {
 	var req createAccountRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -46,27 +40,43 @@ func (s *Server) createAccountHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := userIDFromContext(r)
-	ctx := r.Context()
+	account, err := s.createAccount(r.Context(), userIDFromContext(r), req.AccountType, accountCode)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to open account")
+		return
+	}
 
+	writeJSON(w, http.StatusCreated, account)
+}
+
+// createAccount opens a new TigerBeetle + PostgreSQL account for userID.
+// Shared by createAccountHandler and registerHandler (a new user's first
+// account, opened as part of registration) — the caller is responsible for
+// validating accountType/accountCode first (tigerbeetle.AccountTypeCode),
+// so every error returned here is an infrastructure failure, not a bad
+// request.
+//
+// account_number and the TigerBeetle account ID are both drawn from
+// tigerbeetle_account_seq (starting at 1607, right after the 1605 seeded
+// accounts occupying IDs 2..1606 — see README Account ID Mapping), keeping
+// every account's ID small and human-readable instead of switching to
+// TigerBeetle's random ID() generator only for accounts created here.
+func (s *Server) createAccount(ctx context.Context, userID, accountType string, accountCode uint16) (accountResponse, error) {
 	var sequence uint64
 	if err := s.DB.QueryRow(ctx, `SELECT nextval('tigerbeetle_account_seq')`).Scan(&sequence); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to allocate account ID")
-		return
+		return accountResponse{}, fmt.Errorf("failed to allocate account ID: %w", err)
 	}
 
 	tbAccountID := tb.ToUint128(sequence)
 
 	accountNumber, err := randomAccountNumber(sequence)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate account number")
-		return
+		return accountResponse{}, fmt.Errorf("failed to generate account number: %w", err)
 	}
 
 	userData128, err := tigerbeetle.AccountNumberToUserData128(accountNumber)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to encode account number")
-		return
+		return accountResponse{}, fmt.Errorf("failed to encode account number: %w", err)
 	}
 
 	results, err := s.TB.CreateAccounts([]tb.Account{{
@@ -76,13 +86,11 @@ func (s *Server) createAccountHandler(w http.ResponseWriter, r *http.Request) {
 		UserData128: userData128,
 	}})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create TigerBeetle account")
-		return
+		return accountResponse{}, fmt.Errorf("failed to create TigerBeetle account: %w", err)
 	}
 	for _, result := range results {
 		if result.Status != tb.AccountCreated {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("TigerBeetle rejected account: %s", result.Status))
-			return
+			return accountResponse{}, fmt.Errorf("TigerBeetle rejected account: %s", result.Status)
 		}
 	}
 
@@ -92,19 +100,18 @@ func (s *Server) createAccountHandler(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO accounts (account_number, user_id, initial_balance, currency, account_type, tigerbeetle_account_id)
 		VALUES ($1, $2, 0, 'USD', $3, $4)
 		`,
-		accountNumber, userID, req.AccountType, tigerbeetle.UUIDString(tbAccountID),
+		accountNumber, userID, accountType, tigerbeetle.UUIDString(tbAccountID),
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save account")
-		return
+		return accountResponse{}, fmt.Errorf("failed to save account: %w", err)
 	}
 
-	writeJSON(w, http.StatusCreated, accountResponse{
+	return accountResponse{
 		AccountNumber:  accountNumber,
 		InitialBalance: 0,
 		Currency:       "USD",
-		AccountType:    req.AccountType,
-	})
+		AccountType:    accountType,
+	}, nil
 }
 
 // randomAccountNumber builds a "4001-XXXX-XXXX-NNNN" account number
@@ -153,6 +160,88 @@ func (s *Server) listAccountsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, accounts)
+}
+
+type accountSummaryItem struct {
+	AccountNumber string  `json:"account_number"`
+	AccountType   string  `json:"account_type"`
+	Currency      string  `json:"currency"`
+	Balance       float64 `json:"balance"`
+}
+
+type accountsSummaryResponse struct {
+	TotalBalance float64              `json:"total_balance"`
+	Currency     string               `json:"currency"`
+	Accounts     []accountSummaryItem `json:"accounts"`
+}
+
+// accountsSummaryHandler powers the dashboard: every account the caller
+// owns with its live TigerBeetle balance, plus the total across all of
+// them — summed here, in Go, from those same TigerBeetle-sourced numbers.
+// The frontend only ever renders total_balance as given; it never derives
+// it from initial_balance, transactions, or by summing account balances
+// itself (see README "The balance comes from the backend/TigerBeetle,
+// never calculated in React").
+func (s *Server) accountsSummaryHandler(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r)
+
+	rows, err := s.DB.Query(
+		r.Context(),
+		`SELECT account_number, currency, account_type, tigerbeetle_account_id FROM accounts WHERE user_id = $1 ORDER BY account_number`,
+		userID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list accounts")
+		return
+	}
+	defer rows.Close()
+
+	type row struct {
+		accountNumber, currency, accountType, tigerbeetleAccountID string
+	}
+	var accountRows []row
+	for rows.Next() {
+		var rr row
+		if err := rows.Scan(&rr.accountNumber, &rr.currency, &rr.accountType, &rr.tigerbeetleAccountID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read accounts")
+			return
+		}
+		accountRows = append(accountRows, rr)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read accounts")
+		return
+	}
+
+	var totalCents int64
+	accounts := make([]accountSummaryItem, 0, len(accountRows))
+	for _, rr := range accountRows {
+		tbID, err := tigerbeetle.ParseUUIDString(rr.tigerbeetleAccountID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode TigerBeetle account ID")
+			return
+		}
+
+		cents, err := s.balanceCents(tbID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to fetch balance from TigerBeetle")
+			return
+		}
+
+		totalCents += cents
+		accounts = append(accounts, accountSummaryItem{
+			AccountNumber: rr.accountNumber,
+			AccountType:   rr.accountType,
+			Currency:      rr.currency,
+			Balance:       float64(cents) / 100,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, accountsSummaryResponse{
+		TotalBalance: float64(totalCents) / 100,
+		Currency:     "USD",
+		Accounts:     accounts,
+	})
 }
 
 // ownedAccount is an account's PostgreSQL metadata plus its resolved

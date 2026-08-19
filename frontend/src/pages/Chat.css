@@ -1,0 +1,226 @@
+.chat-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 32px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.chat-header h1 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.back-link {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.back-link:hover {
+  color: var(--color-primary);
+}
+
+.chat-content {
+  flex: 1;
+  max-width: 640px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-empty {
+  margin: auto 0;
+  text-align: center;
+  color: var(--color-text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.chat-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 320px;
+}
+
+.chat-suggestion {
+  padding: 10px 16px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: 14px;
+  color: var(--color-text);
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.chat-suggestion:hover {
+  border-color: var(--color-primary);
+}
+
+/* Messages */
+
+.chat-messages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-message {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-message--user {
+  align-items: flex-end;
+}
+
+.chat-message--assistant {
+  align-items: flex-start;
+}
+
+.chat-bubble {
+  max-width: 80%;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  font-size: 15px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.chat-message--user .chat-bubble {
+  background: var(--color-primary);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.chat-message--assistant .chat-bubble {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-bottom-left-radius: 4px;
+}
+
+/* The assistant's replies are rendered as Markdown (react-markdown) since
+   the model returns tables/bold/lists — e.g. transaction history comes
+   back as a Markdown table. These rules only apply to assistant bubbles;
+   the user's own messages stay plain text. */
+.chat-message--assistant .chat-bubble > *:first-child {
+  margin-top: 0;
+}
+
+.chat-message--assistant .chat-bubble > *:last-child {
+  margin-bottom: 0;
+}
+
+.chat-message--assistant .chat-bubble p {
+  margin: 0 0 10px;
+}
+
+.chat-message--assistant .chat-bubble ul,
+.chat-message--assistant .chat-bubble ol {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.chat-message--assistant .chat-bubble strong {
+  font-weight: 700;
+}
+
+.chat-message--assistant .chat-bubble .chat-table-wrap {
+  overflow-x: auto;
+  margin: 0 0 10px;
+}
+
+.chat-message--assistant .chat-bubble table {
+  border-collapse: collapse;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.chat-message--assistant .chat-bubble th,
+.chat-message--assistant .chat-bubble td {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.chat-message--assistant .chat-bubble th {
+  background: var(--color-bg);
+  font-weight: 700;
+}
+
+.chat-bubble--typing {
+  display: flex;
+  align-items: center;
+  padding: 14px 16px;
+}
+
+.chat-confirmation {
+  margin-top: 6px;
+}
+
+.chat-confirmation-done {
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+/* Footer / input */
+
+.chat-footer {
+  max-width: 640px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 0 24px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-form {
+  display: flex;
+  gap: 10px;
+}
+
+.chat-input {
+  flex: 1;
+  padding: 12px 16px;
+  font-size: 15px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chat-input:focus {
+  border-color: var(--color-focus);
+  box-shadow: 0 0 0 3px rgba(107, 138, 253, 0.15);
+}
+
+.chat-input:disabled {
+  opacity: 0.6;
+}
+
+.chat-form .button {
+  border-radius: 999px;
+}

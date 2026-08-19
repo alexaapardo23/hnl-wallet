@@ -10,17 +10,135 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Applied once by the postgres image's own entrypoint, only when
+      # the volume is still empty — see backend/database/schema.sql.
+      - ./backend/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hnl_user -d hnl_wallet"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   tigerbeetle:
     image: ghcr.io/tigerbeetle/tigerbeetle:latest
     container_name: hnl-tigerbeetle
-    command: start --addresses=0.0.0.0:3000 /data/0.tigerbeetle
+    # TigerBeetle's data file must be formatted once, before the first
+    # `start`, or `start` fails against it. Rather than requiring that as
+    # a manual step before `docker compose up` (see README TigerBeetle),
+    # backend/scripts/init-tigerbeetle.sh formats it here if it doesn't
+    # exist yet, then starts it.
+    # Keeps the image's own tini (PID 1 / signal reaping) ahead of our sh
+    # wrapper — see `docker inspect ...tigerbeetle --format
+    # '{{.Config.Entrypoint}}'` (["tini", "--", "/tigerbeetle"]) for the
+    # default this replaces.
+    entrypoint: ["tini", "--", "sh", "/init-tigerbeetle.sh"]
     ports:
       - "3000:3000"
     volumes:
       - tigerbeetle_data:/data
+      - ./backend/scripts/init-tigerbeetle.sh:/init-tigerbeetle.sh:ro
     security_opt:
       - seccomp=unconfined
+
+  # One-shot: seeds data/data.json into both Postgres and TigerBeetle,
+  # then exits. Runs seed-all.sh, which skips the whole pipeline (via
+  # seed-guard) if the users table is already non-empty — safe to leave
+  # in the stack on every `docker compose up`, not just the first.
+  seed:
+    build:
+      context: ./backend
+    container_name: hnl-seed
+    command: ["./seed-all.sh"]
+    # Same io_uring reasoning as `api` below — seed-tigerbeetle,
+    # seed-initial-balances and seed-transactions all call
+    # tigerbeetle.NewClient() too.
+    security_opt:
+      - seccomp=unconfined
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tigerbeetle:
+        condition: service_started
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-hnl_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hnl_password}
+      POSTGRES_DB: ${POSTGRES_DB:-hnl_wallet}
+      TIGERBEETLE_ADDRESS: tigerbeetle:3000
+      DATA_FILE: /app/data/data.json
+    volumes:
+      # Seed data, not code — mounted read-only rather than baked into
+      # the image so a bind mount, not a rebuild, is enough to reseed
+      # from an edited data.json.
+      - ./data:/app/data:ro
+
+  api:
+    build:
+      context: ./backend
+    container_name: hnl-api
+    # TigerBeetle's Go *client* (not just its server) uses io_uring
+    # internally, same as the tigerbeetle service below — without this,
+    # tigerbeetle.NewClient() crashes the container on startup
+    # ("io_uring is not available" / PermissionDenied).
+    security_opt:
+      - seccomp=unconfined
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tigerbeetle:
+        condition: service_started
+      seed:
+        condition: service_completed_successfully
+    environment:
+      # Container-to-container addresses — services reach each other by
+      # name on Docker's internal network, never by 127.0.0.1/localhost
+      # (that's only correct for the browser, running on the host).
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-hnl_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hnl_password}
+      POSTGRES_DB: ${POSTGRES_DB:-hnl_wallet}
+      TIGERBEETLE_ADDRESS: tigerbeetle:3000
+      MCP_SERVER_URL: http://mcp-server:8081/mcp
+      # This one *is* browser-facing (CORS) — the frontend container is
+      # reached by the browser via the host-published port, not by
+      # container name, so this must stay a localhost URL.
+      FRONTEND_URL: http://localhost:5173
+      JWT_SECRET: ${JWT_SECRET}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL}
+    ports:
+      - "8080:8080"
+
+  mcp-server:
+    build:
+      context: ./backend
+    container_name: hnl-mcp-server
+    # Same image as `api` (see backend/Dockerfile) — just runs the other
+    # binary it builds.
+    command: ["./mcp-server"]
+    depends_on:
+      - api
+    environment:
+      HNL_API_URL: http://api:8080
+      MCP_SERVER_PORT: 8081
+    ports:
+      - "8081:8081"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the JS bundle at build time (see frontend/Dockerfile)
+        # — this is the URL the *browser* will call, so it's the
+        # host-published API port, not the container-internal one.
+        VITE_API_URL: http://localhost:8080
+    container_name: hnl-frontend
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
 
 volumes:
   postgres_data:
