@@ -7,9 +7,9 @@ import { accountsService } from "../services/api";
 import { useAuth } from "../hooks/useAuth";
 
 const TITLES = {
-  deposit: "Deposit",
-  withdraw: "Withdraw",
-  transfer: "Transfer",
+  deposit: "Depositar",
+  withdraw: "Retirar",
+  transfer: "Transferir",
 };
 
 /**

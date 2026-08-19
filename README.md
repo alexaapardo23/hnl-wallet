@@ -390,6 +390,16 @@ Verified in a real browser: the table correctly rendered a mix of all five trans
 
 The frontend (Vite's dev server, `http://localhost:5173` by default) and the API (`http://localhost:8080`) are different origins, so the API needs to explicitly allow the browser to call it — see [`backend/api/cors.go`](backend/api/cors.go) and the `FRONTEND_URL` environment variable below.
 
+### Language
+
+The UI is Spanish throughout — labels, buttons, headers, dates (`19 ago` rather than `Aug 19`), and every error message a user can actually see.
+
+The API itself is English-only (see `backend/api/*.go` — every `writeError` call is a plain English string), so the frontend can't just relay `err.message` and call it done. [`services/api.js`](frontend/src/services/api.js) keeps a translation table (`ERROR_TRANSLATIONS`) covering every error string the endpoints this frontend calls can actually return (login, deposit, withdraw, transfer, account lookups), and `request()` translates through it before the error ever reaches a page or a modal — `Login.jsx`, `OperationModal.jsx`, and `Dashboard.jsx`/`AccountDetail.jsx`'s retry banners all display `err.message` directly and never see the original English. A message the API could return that isn't in the table falls back to the raw English text rather than being hidden — visibly wrong is safer than silently wrong.
+
+Currency amounts are the one thing that stays formatted the US way (`$23,553.34`, comma thousands / period decimal) rather than switching to `es-ES`'s `23.553,34 US$` — every balance verified against the API throughout this README was checked in that format, and it's the standard way USD amounts are usually shown regardless of UI language.
+
+Verified in a real browser: a wrong password renders `Email o contraseña incorrectos.` (translated from the API's `invalid email or password`), and a withdrawal exceeding the balance renders `Fondos insuficientes.` (translated from `insufficient funds`) inline in the modal — confirming the translation layer is actually in the request path, not just present in the source.
+
 ## Database Schema
 
 ### Identity Model

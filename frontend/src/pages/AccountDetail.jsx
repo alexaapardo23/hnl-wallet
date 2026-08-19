@@ -7,17 +7,17 @@ import { Alert } from "../components/Alert";
 import "./AccountDetail.css";
 
 const ACCOUNT_TYPE_LABELS = {
-  checking: "Checking",
-  savings: "Savings",
-  investment: "Investment",
+  checking: "Corriente",
+  savings: "Ahorros",
+  investment: "Inversión",
 };
 
 const TRANSACTION_TYPE_LABELS = {
-  deposit: "Deposit",
-  withdrawal: "Withdrawal",
-  transfer: "Transfer",
-  internal_transfer: "Internal Transfer",
-  initial_balance: "Initial Balance",
+  deposit: "Depósito",
+  withdrawal: "Retiro",
+  transfer: "Transferencia",
+  internal_transfer: "Transferencia interna",
+  initial_balance: "Saldo inicial",
 };
 
 const currencyFormatter = new Intl.NumberFormat("en-US", {
@@ -26,7 +26,7 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
   signDisplay: "never",
 });
 
-const dateFormatter = new Intl.DateTimeFormat("en-US", {
+const dateFormatter = new Intl.DateTimeFormat("es-ES", {
   month: "short",
   day: "numeric",
 });
@@ -42,22 +42,22 @@ function maskAccountNumber(accountNumber) {
 function describeTransaction(tx) {
   const counterparty =
     tx.counterparty_account_number === "EXTERNAL"
-      ? "external"
+      ? "el exterior"
       : maskAccountNumber(tx.counterparty_account_number);
 
   switch (tx.type) {
     case "deposit":
-      return `From ${counterparty}`;
+      return `Desde ${counterparty}`;
     case "withdrawal":
-      return `To ${counterparty}`;
+      return `Hacia ${counterparty}`;
     case "transfer":
-      return tx.direction === "incoming" ? `From ${counterparty}` : `To ${counterparty}`;
+      return tx.direction === "incoming" ? `Desde ${counterparty}` : `Hacia ${counterparty}`;
     case "internal_transfer":
       return tx.direction === "incoming"
-        ? `From your ${counterparty}`
-        : `To your ${counterparty}`;
+        ? `Desde tu cuenta ${counterparty}`
+        : `Hacia tu cuenta ${counterparty}`;
     case "initial_balance":
-      return "Initial funding";
+      return "Fondeo inicial";
     default:
       return counterparty;
   }
@@ -100,29 +100,29 @@ export function AccountDetail() {
 
             <div className="account-actions">
               <Button type="button" onClick={() => setActiveOperation("deposit")}>
-                Deposit
+                Depositar
               </Button>
               <Button type="button" onClick={() => setActiveOperation("withdraw")}>
-                Withdraw
+                Retirar
               </Button>
               <Button type="button" onClick={() => setActiveOperation("transfer")}>
-                Transfer
+                Transferir
               </Button>
             </div>
           </section>
         )}
 
         <section className="transactions-section">
-          <h2>Recent transactions</h2>
+          <h2>Transacciones recientes</h2>
 
           <div className="transactions-table-wrap">
             <table className="transactions-table">
               <thead>
                 <tr>
-                  <th>Date</th>
-                  <th>Type</th>
-                  <th>Description</th>
-                  <th className="col-amount">Amount</th>
+                  <th>Fecha</th>
+                  <th>Tipo</th>
+                  <th>Descripción</th>
+                  <th className="col-amount">Monto</th>
                 </tr>
               </thead>
               <tbody>

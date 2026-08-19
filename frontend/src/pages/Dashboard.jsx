@@ -6,9 +6,9 @@ import { Alert } from "../components/Alert";
 import "./Dashboard.css";
 
 const ACCOUNT_TYPE_LABELS = {
-  checking: "Checking",
-  savings: "Savings",
-  investment: "Investment",
+  checking: "Corriente",
+  savings: "Ahorros",
+  investment: "Inversión",
 };
 
 const currencyFormatter = new Intl.NumberFormat("en-US", {
@@ -50,7 +50,7 @@ export function Dashboard() {
         )}
 
         <section className="balance-card">
-          <p className="balance-label">Total Balance</p>
+          <p className="balance-label">Balance Total</p>
           {loading ? (
             <div className="balance-skeleton" aria-label="Cargando balance" />
           ) : (
@@ -61,7 +61,7 @@ export function Dashboard() {
         </section>
 
         <section className="accounts-section">
-          <h2>My Accounts</h2>
+          <h2>Mis Cuentas</h2>
 
           {loading && (
             <ul className="accounts-list">

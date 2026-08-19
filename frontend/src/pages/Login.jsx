@@ -64,7 +64,7 @@ export function Login() {
         />
 
         <Button type="submit" block loading={loading}>
-          {loading ? "Ingresando..." : "Login"}
+          {loading ? "Ingresando..." : "Iniciar sesión"}
         </Button>
       </form>
     </div>
