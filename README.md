@@ -260,13 +260,16 @@ A Go HTTP API (stdlib `net/http`, no external router — Go 1.22+'s `ServeMux` h
 ```text
 backend/
 ├── main.go          # wiring: env, PostgreSQL pool, TigerBeetle client, HTTP server
-├── api/              # HTTP handlers (auth, accounts) + routing + auth middleware
+├── api/              # HTTP handlers (auth, accounts, chat) + routing + auth middleware
 ├── auth/              # password hashing (bcrypt) and JWT issuing/parsing
+├── openrouter/        # minimal OpenRouter chat-completions client
 ├── database/         # PostgreSQL connection pool
 ├── tigerbeetle/       # TigerBeetle client + account_number <-> TigerBeetle ID mapping
 ├── models/            # shared data.json-shaped structs
 ├── seed/              # data.json loading + PostgreSQL seeding
-└── cmd/               # one-off seed/import programs (see Seed Data)
+└── cmd/
+    ├── mcp-server/     # standalone MCP server (see AI / MCP Integration)
+    └── ...             # one-off seed/import programs (see Seed Data)
 ```
 
 ## Frontend
@@ -303,6 +306,7 @@ All request/response bodies are JSON. Endpoints under `Auth required` expect `Au
 | `POST` | `/accounts/{account_number}/deposit` | Yes | Credit the account from `SystemAccountID` (`{"amount": 500.25}`, must be `> 0`) — see [Financial Operations](#financial-operations) |
 | `POST` | `/accounts/{account_number}/withdraw` | Yes | Debit the account to `SystemAccountID` (`{"amount": 200.10}`, must be `> 0` and `<=` current balance) — see [Financial Operations](#financial-operations) |
 | `POST` | `/transfers` | Yes | Move money between two accounts (`{"from_account", "to_account", "amount"}`) — `from_account` must belong to the caller, `to_account` doesn't have to — see [Financial Operations](#financial-operations) |
+| `POST` | `/chat` | Yes | Ask about the caller's own money in natural language (`{"message": "¿Cuánto dinero tengo?"}`), via OpenRouter + MCP — `503` if chat isn't configured — see [AI / MCP Integration](#ai--mcp-integration) |
 
 Every `/accounts/...` route is scoped to accounts owned by the authenticated user; another user's account (or a nonexistent one) returns `404` either way, so ownership can't be probed by comparing error responses.
 
@@ -441,6 +445,84 @@ Implemented in [`backend/api/transfer.go`](backend/api/transfer.go).
 
 ## AI / MCP Integration
 
+`POST /chat` lets a user ask about their own money in natural language:
+
+```text
+Usuario
+   │
+   ▼
+Chat / Frontend
+   │
+   ▼
+OpenRouter
+   │
+  LLM
+   │
+tool call
+   ▼
+MCP Server
+   │
+   ▼
+Go API
+  /         \
+ ▼           ▼
+PostgreSQL  TigerBeetle
+```
+
+Concretely, `POST /chat` (`{"message": "¿Cuánto dinero tengo?"}`, auth required like every other endpoint):
+
+1. Connects to the MCP server ([`cmd/mcp-server`](backend/cmd/mcp-server/main.go)) over Streamable HTTP, **forwarding the caller's own bearer token unchanged** as the `Authorization` header on every MCP request.
+2. Lists the MCP server's tools and offers them to OpenRouter alongside the user's message.
+3. If the model responds with a tool call, executes it against the MCP server and feeds the result back to OpenRouter for a final natural-language reply.
+
+Implemented in [`backend/api/chat.go`](backend/api/chat.go).
+
+### Why a separate MCP server
+
+`cmd/mcp-server` is its own process, reachable over HTTP (`MCP_SERVER_URL`, default `http://localhost:8081/mcp`) — not a package called in-process by `POST /chat` — because that's what the architecture above actually calls for: a distinct MCP Server sitting between "tool call" and "Go API". Concretely, that separation buys two things:
+
+- **No duplicated business logic.** Every tool is a thin wrapper that calls the existing HNL Wallet API (`GET /accounts`, `GET /accounts/{account_number}/balance`) instead of touching PostgreSQL or TigerBeetle itself. All ownership checks and balance computation stay defined in exactly one place.
+- **No new attack surface.** The MCP server never validates or inspects the bearer token it's given — it just forwards it. It is authorization-free by construction: an LLM can never see more than the user themselves could see by calling the API directly, because every tool call is subject to the exact same JWT + ownership checks as a normal request.
+
+### Tools (read-only, scoped to "how much money do I have")
+
+| Tool | Wraps | Notes |
+|---|---|---|
+| `get_accounts` | `GET /accounts` + `GET /accounts/{account_number}` per account | Returns every account the caller owns, each with its live TigerBeetle balance — the single call that answers "¿Cuánto dinero tengo?" in one round trip |
+| `get_balance` | `GET /accounts/{account_number}/balance` | Answers a follow-up about one specific account |
+
+`get_transaction_history` is intentionally **not implemented yet** — this first pass is scoped to balance questions, per the goal of getting `get_accounts`/`get_balance` working end-to-end before adding history.
+
+### Model configuration
+
+The model is swappable without touching any code:
+
+```bash
+OPENROUTER_API_KEY=...
+OPENROUTER_MODEL=anthropic/claude-3.5-sonnet   # or openai/gpt-4o, or any other OpenRouter model id
+```
+
+[`backend/openrouter`](backend/openrouter/client.go) is a minimal client for OpenRouter's OpenAI-compatible chat completions API — switching Claude → GPT → anything else OpenRouter proxies is a one-line `.env` change. If `OPENROUTER_API_KEY` is unset, the server logs a warning and `POST /chat` returns `503`; every other endpoint is unaffected.
+
+### Running it locally
+
+```bash
+# terminal 1
+go run .                    # main API, :8080
+
+# terminal 2
+go run ./cmd/mcp-server      # MCP server, :8081
+```
+
+### What's verified vs. not yet
+
+Verified end-to-end against the running stack, using a raw MCP client (bypassing OpenRouter, since that leg needs a real `OPENROUTER_API_KEY`):
+
+- `get_accounts` and `get_balance` correctly return live TigerBeetle balances through the full `MCP client -> mcp-server -> Go API -> TigerBeetle` chain.
+- Ownership is enforced through MCP exactly like a normal request: calling `get_balance` for an account the caller doesn't own returns the same `404` as `GET /accounts/{account_number}/balance` would, surfaced as an MCP tool error (`isError: true`) rather than leaking data.
+
+**Not yet verified**: the OpenRouter leg itself (`Chat -> OpenRouter -> LLM -> tool call`) — that requires a real `OPENROUTER_API_KEY`, which isn't available in this environment.
+
 ## Environment Variables
 
 Copy [`.env.example`](.env.example) to `.env` (git-ignored) and fill it in. All `cmd/*` programs and the server load it via `godotenv.Load("../.env")`, so they're expected to run from `backend/`.
@@ -450,6 +532,11 @@ Copy [`.env.example`](.env.example) to `.env` (git-ignored) and fill it in. All 
 | `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | server, all `cmd/seed*` | PostgreSQL connection |
 | `DATA_FILE` | all `cmd/seed*` | Path to `data/data.json` |
 | `JWT_SECRET` | server | HMAC secret used to sign/verify login JWTs — the server refuses to start without it |
+| `OPENROUTER_API_KEY` | server | Enables `POST /chat` when set; leave empty to disable chat only |
+| `OPENROUTER_MODEL` | server | e.g. `anthropic/claude-3.5-sonnet` — required if `OPENROUTER_API_KEY` is set |
+| `MCP_SERVER_URL` | server | Where the server reaches `cmd/mcp-server`, default `http://localhost:8081/mcp` |
+| `HNL_API_URL` | `cmd/mcp-server` | Where `cmd/mcp-server` reaches the main API, default `http://localhost:8080` |
+| `MCP_SERVER_PORT` | `cmd/mcp-server` | Default `8081` |
 
 TigerBeetle's address (`127.0.0.1:3000`) is currently hardcoded in [`tigerbeetle.NewClient`](backend/tigerbeetle/client.go) rather than read from the environment.
 
