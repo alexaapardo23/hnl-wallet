@@ -29,6 +29,17 @@
   color: var(--color-text-muted);
 }
 
+.chat-link {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.chat-link:hover {
+  text-decoration: underline;
+}
+
 .dashboard-content {
   max-width: 640px;
   margin: 0 auto;

@@ -33,6 +33,9 @@ export function Dashboard() {
         <h1>HNL Wallet</h1>
         <div className="dashboard-header-right">
           <span className="dashboard-user">{firstName}</span>
+          <Link to="/chat" className="chat-link">
+            Asistente
+          </Link>
           <Button type="button" onClick={logout}>
             Cerrar sesión
           </Button>

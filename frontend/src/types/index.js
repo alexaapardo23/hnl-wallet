@@ -38,6 +38,16 @@
  * @property {number} amount
  * @property {string} counterparty_account_number
  * @property {string} timestamp
+ *
+ * @typedef {Object} PendingAction
+ * @property {string} tool
+ * @property {Object<string, any>} arguments
+ *
+ * @typedef {Object} ChatResponse
+ * @property {string} reply
+ * @property {boolean} [requires_confirmation]
+ * @property {string} [confirmation_token]
+ * @property {PendingAction} [pending_action]
  */
 
 export {};

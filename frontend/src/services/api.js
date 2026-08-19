@@ -33,10 +33,23 @@ const ERROR_TRANSLATIONS = {
   "full_name is required": "El nombre completo es obligatorio.",
   "account_type must be one of: checking, savings, investment":
     "El tipo de cuenta debe ser checking, savings o investment.",
+  "message is required": "Escribe un mensaje.",
+  "confirmation_token is required": "Falta el token de confirmación.",
+  "invalid or expired confirmation_token": "El token de confirmación no es válido o expiró.",
+  "this confirmation_token was not issued to you": "Este token de confirmación no te pertenece.",
+  "chat is not configured (OPENROUTER_API_KEY is not set)": "El chat no está disponible en este momento.",
 };
 
-function translateError(message) {
-  return ERROR_TRANSLATIONS[message] ?? message;
+// Some server errors embed a dynamic Go error (e.g. "failed to reach MCP
+// server: dial tcp ...") that can't be matched as an exact string — those
+// fall back to a translation by HTTP status instead of by literal text.
+const STATUS_FALLBACKS = {
+  502: "No se pudo conectar con el asistente. Intenta de nuevo.",
+  503: "Este servicio no está disponible en este momento.",
+};
+
+function translateError(message, status) {
+  return ERROR_TRANSLATIONS[message] ?? STATUS_FALLBACKS[status] ?? message;
 }
 
 async function request(path, { method = "GET", body, token } = {}) {
@@ -57,7 +70,10 @@ async function request(path, { method = "GET", body, token } = {}) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new ApiError(translateError(data.error) || "Ocurrió un error inesperado.", response.status);
+    throw new ApiError(
+      translateError(data.error, response.status) || "Ocurrió un error inesperado.",
+      response.status,
+    );
   }
 
   return data;
@@ -103,5 +119,30 @@ export const accountsService = {
       method: "POST",
       token,
       body: { from_account: fromAccount, to_account: toAccount, amount },
+    }),
+};
+
+export const chatService = {
+  /**
+   * React Chat -> POST /chat -> Go API -> OpenRouter -> tool call ->
+   * MCP Server -> Go API -> TigerBeetle/PostgreSQL -> ... -> React.
+   * If the model asked for deposit/withdraw/transfer, the response carries
+   * requires_confirmation + confirmation_token instead of executing it —
+   * see chatService.confirm.
+   * @returns {Promise<import('../types').ChatResponse>}
+   */
+  send: (token, message) => request("/chat", { method: "POST", token, body: { message } }),
+
+  /**
+   * Executes a financial action POST /chat proposed, using the exact
+   * amount/accounts signed into confirmationToken — nothing about the
+   * pending action can be altered from here.
+   * @returns {Promise<import('../types').ChatResponse>}
+   */
+  confirm: (token, confirmationToken) =>
+    request("/chat/confirm", {
+      method: "POST",
+      token,
+      body: { confirmation_token: confirmationToken },
     }),
 };

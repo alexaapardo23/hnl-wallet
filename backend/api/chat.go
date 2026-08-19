@@ -19,7 +19,7 @@ const chatSystemPrompt = `You are the HNL Wallet assistant. You can see the auth
 
 When the user asks to deposit, withdraw, or transfer money: immediately call the matching tool (deposit, withdraw, or transfer) with the exact amount and account(s) from their message. Do this on your very first response — do not ask the user to confirm in your own words first, and do not describe what you are about to do instead of calling the tool. Confirmation is handled automatically by the system after your tool call, using its own message to the user, not yours — calling the tool never moves money by itself. If any required detail (amount, account) is genuinely missing from the user's message, ask for it before calling the tool; otherwise, call it right away.
 
-Reply in the same language the user wrote in. All amounts are in USD.`
+Always reply in Spanish, regardless of what language the user writes in — the HNL Wallet frontend is Spanish-only, so a reply in any other language would look broken to every user. All amounts are in USD.`
 
 // financialActionTools names every tool that moves money. POST /chat never
 // invokes these directly on a model's tool call, no matter what the model
@@ -176,7 +176,7 @@ func (s *Server) buildConfirmationResponse(userID string, call openrouter.ToolCa
 	}
 
 	return chatResponse{
-		Reply:                fmt.Sprintf("%s ¿Confirmas? Envía el confirmation_token a POST /chat/confirm para ejecutarlo.", summary),
+		Reply:                fmt.Sprintf("%s ¿Confirmas esta operación?", summary),
 		RequiresConfirmation: true,
 		ConfirmationToken:    token,
 		PendingAction:        &pendingAction{Tool: call.Function.Name, Arguments: args},

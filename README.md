@@ -386,6 +386,33 @@ Incoming amounts render in the accent color, outgoing in a muted red — reusing
 
 Verified in a real browser: the table correctly rendered a mix of all five transaction kinds for one account, each row's Description matching the rule above (e.g. an `internal_transfer` to the same user's savings account showing `To your •••• 0799`, a `transfer` to a different user showing `To •••• 0176`), amounts colored red for outgoing and teal for incoming, and the newest `deposit`/`internal_transfer` from the previous section's live operations testing appearing correctly at the top.
 
+### Chat
+
+`/chat` ([`src/pages/Chat.jsx`](frontend/src/pages/Chat.jsx), linked from the Dashboard header as "Asistente") is a chat UI over the same path documented in [AI / MCP Integration](#ai--mcp-integration):
+
+```text
+React Chat
+    │  POST /chat
+    ▼
+Go API ──▶ OpenRouter ──tool call──▶ MCP Server :8081 ──▶ Go API ──▶ TigerBeetle / PostgreSQL
+    │                                                                        │
+    └────────────────────────── MCP → OpenRouter → Go API ◀─────────────────┘
+    ▼
+React
+```
+
+`useChat` ([`src/hooks/useChat.js`](frontend/src/hooks/useChat.js)) manages the message list and two calls, `chatService.send`/`chatService.confirm`:
+
+- A read question ("¿Cuánto dinero tengo?") gets a plain assistant bubble.
+- A financial action ("Deposita $50 en mi cuenta") gets an assistant bubble carrying the API's `requires_confirmation` + `confirmation_token`, rendered with a **Confirmar** button instead of executing — nothing has moved yet at this point (see [Financial Actions Require Confirmation](#financial-actions-require-confirmation)). Clicking it calls `POST /chat/confirm` with that exact token; the button is replaced with "Operación enviada." and the real result arrives as a new assistant bubble.
+
+Two things changed in the backend while wiring this up to a real UI instead of `curl`:
+
+- **The confirmation reply text.** It used to end with *"Envía el confirmation_token a POST /chat/confirm para ejecutarlo"* — reasonable instructions for an API consumer, but broken-looking coming from a chat bubble a human is reading. It's now just *"¿Confirmas esta operación?"*; the actual token still travels in the response's `confirmation_token` field, which is what the **Confirmar** button uses — the frontend never parses it out of the reply text.
+- **The system prompt now hardcodes Spanish** (`chatSystemPrompt` in `backend/api/chat.go`) instead of "reply in the same language the user wrote in" — this frontend is Spanish-only (see [Language](#language)), so a dynamically-detected reply language could only ever be wrong for it.
+
+Verified end-to-end in a real browser, backed by the running API, MCP server, and OpenRouter: "¿Cuánto dinero tengo?" rendered the real total across the user's three accounts; "Deposita $50 en mi cuenta 4001-4666-9766-0800" produced a confirmation bubble with a **Confirmar** button and moved no money yet (balance checked via the API: still `$23,553.34`); clicking **Confirmar** executed it and the chat's own follow-up message ("...actualizando el saldo a 23,603.34 USD") matched the account's real new balance exactly. One OpenRouter follow-up call failed transiently mid-testing (`502`, `"Provider returned error"` — a free-tier model instability, not a bug in this code) and rendered the translated `No se pudo conectar con el asistente. Intenta de nuevo.` correctly; retrying the same message immediately succeeded.
+
 ### Talking to the API from the browser
 
 The frontend (Vite's dev server, `http://localhost:5173` by default) and the API (`http://localhost:8080`) are different origins, so the API needs to explicitly allow the browser to call it — see [`backend/api/cors.go`](backend/api/cors.go) and the `FRONTEND_URL` environment variable below.
