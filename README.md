@@ -40,10 +40,28 @@ The main architectural principle is that PostgreSQL manages application and user
 ```text
 hnl-wallet/
 ├── backend/
+│   ├── cmd/
+│   │   ├── api/
+│   │   ├── mcp-server/
+│   │   ├── seed/
+│   │   └── ...
+│   ├── database/
+│   ├── models/
+│   ├── ...
+│   ├── Dockerfile
+│   └── go.mod
+│
 ├── frontend/
+│   ├── src/
+│   ├── Dockerfile
+│   └── ...
+│
 ├── data/
+│   └── data.json
+│
 ├── docker-compose.yml
 ├── .env
+├── .env.example
 ├── .gitignore
 └── README.md
 ```
@@ -92,6 +110,19 @@ TigerBeetle requires `io_uring` for its storage engine. The Docker container use
 security_opt:
   - seccomp=unconfined
 ```
+
+This same `io_uring` requirement applies to TigerBeetle's Go *client*, not just its server — see [Docker](#docker) for why `backend`'s `api` service needs the identical `security_opt`.
+
+### First-time setup: formatting the data file
+
+`docker-compose.yml`'s `tigerbeetle` service only ever *starts* TigerBeetle (`start --addresses=... /data/0.tigerbeetle`) — the very first time, before anything has been written to the `tigerbeetle_data` volume, that file doesn't exist yet and needs to be formatted once:
+
+```bash
+docker compose run --rm tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0.tigerbeetle
+docker compose up -d
+```
+
+Skip this on every subsequent `docker compose up` — the volume persists the formatted file, and re-running `format` against an already-formatted one fails.
 
 ## Financial Data Model
 
@@ -255,11 +286,10 @@ The expected services are:
 
 ## Backend
 
-A Go HTTP API (stdlib `net/http`, no external router — Go 1.22+'s `ServeMux` handles method + path patterns natively) backed by PostgreSQL (users/accounts metadata) and TigerBeetle (balances/transfers). Entry point: [`main.go`](backend/main.go); routes are wired in [`api.NewRouter`](backend/api/server.go).
+A Go HTTP API (stdlib `net/http`, no external router — Go 1.22+'s `ServeMux` handles method + path patterns natively) backed by PostgreSQL (users/accounts metadata) and TigerBeetle (balances/transfers). Entry point: [`cmd/api/main.go`](backend/cmd/api/main.go); routes are wired in [`api.NewRouter`](backend/api/server.go).
 
 ```text
 backend/
-├── main.go          # wiring: env, PostgreSQL pool, TigerBeetle client, HTTP server
 ├── api/              # HTTP handlers (auth, accounts, chat) + routing + auth middleware
 ├── auth/              # password hashing (bcrypt) and JWT issuing/parsing
 ├── openrouter/        # minimal OpenRouter chat-completions client
@@ -267,10 +297,14 @@ backend/
 ├── tigerbeetle/       # TigerBeetle client + account_number <-> TigerBeetle ID mapping
 ├── models/            # shared data.json-shaped structs
 ├── seed/              # data.json loading + PostgreSQL seeding
+├── Dockerfile          # builds cmd/api and cmd/mcp-server into one image (see Docker)
 └── cmd/
+    ├── api/            # main API server — wiring: env, PostgreSQL pool, TigerBeetle client, HTTP server
     ├── mcp-server/     # standalone MCP server (see AI / MCP Integration)
     └── ...             # one-off seed/import programs (see Seed Data)
 ```
+
+`cmd/api/main.go` used to live at `backend/main.go` — moved under `cmd/` to match every other entry point in this project (`cmd/mcp-server`, `cmd/seed`, ...) and to give the [Docker](#docker) build a conventional `./cmd/<binary>` target per binary.
 
 ## Frontend
 
@@ -746,7 +780,7 @@ OPENROUTER_MODEL=openai/gpt-oss-20b:free   # or any other OpenRouter model id �
 
 ```bash
 # terminal 1
-go run .                    # main API, :8080
+go run ./cmd/api             # main API, :8080
 
 # terminal 2
 go run ./cmd/mcp-server      # MCP server, :8081
@@ -795,12 +829,14 @@ TigerBeetle's address (`127.0.0.1:3000`) is currently hardcoded in [`tigerbeetle
 
 ## Running the Application
 
+Two ways to run this. For day-to-day development, run Go and Vite directly — instant rebuilds, no image to rebuild per change:
+
 ```bash
 # 1. Infrastructure
-docker compose up -d
+docker compose up -d postgres tigerbeetle
 
 # 2. Backend (from backend/)
-go run .
+go run ./cmd/api
 
 # 3. MCP server, if you want chat (from backend/)
 go run ./cmd/mcp-server
@@ -810,7 +846,27 @@ npm install   # first time only
 npm run dev
 ```
 
-Open the URL Vite prints (`http://localhost:5173` by default).
+Open the URL Vite prints (`http://localhost:5173` by default). See [Docker](#docker) below to run the whole stack — API, MCP server, and frontend included — as containers instead.
+
+## Docker
+
+`docker compose up -d` builds and runs everything: `postgres`, `tigerbeetle`, `api` ([`backend/Dockerfile`](backend/Dockerfile)), `mcp-server` (same image, different `command:`), and `frontend` ([`frontend/Dockerfile`](frontend/Dockerfile), built and served via nginx). One prerequisite this doesn't automate — see [TigerBeetle](#tigerbeetle) — is formatting the TigerBeetle data file the very first time, before any container has written to that volume:
+
+```bash
+docker compose run --rm tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0.tigerbeetle
+docker compose up -d
+```
+
+Two things that only surfaced by actually building and running these images, not from reading the code:
+
+- **`backend/Dockerfile` builds on Debian, not Alpine, on purpose.** TigerBeetle's Go client (`tigerbeetle-go`) links a prebuilt native static library via CGO (see its `native/` directory) — `CGO_ENABLED=0`'s usual "static binary on Alpine" shortcut would break it, and mixing Alpine's musl libc for the runtime stage with a glibc-linked CGO binary from the builder risks a mismatch. Both stages are `bookworm`-based instead. The builder also needs `gcc`/`libc6-dev` installed explicitly — the plain `golang` image doesn't include a C toolchain.
+- **The `api` service needs `security_opt: seccomp=unconfined`, same as `tigerbeetle`.** Not just TigerBeetle's *server* — its Go *client* uses `io_uring` internally too. Without this, `tigerbeetle.NewClient()` doesn't return an error, it crashes the container outright (`error(io): io_uring is not available` / `SIGABRT`) the moment `cmd/api` starts. `mcp-server` doesn't need it — see [MCP Does Not Replace Our Authorization System](#mcp-does-not-replace-our-authorization-system), it never touches TigerBeetle directly, only the `api` container does.
+
+Also relevant: [`tigerbeetle.NewClient`](backend/tigerbeetle/client.go) resolves `TIGERBEETLE_ADDRESS` (e.g. `tigerbeetle:3000`, the Docker service name) to an IP before handing it to the TigerBeetle client — its native `tb_client_init` parses addresses itself and doesn't do DNS resolution, so a hostname that resolves fine everywhere else in Go fails there with `ErrInvalidAddress`. This keeps `TIGERBEETLE_ADDRESS` hostname-friendly like every other `*_URL`/`*_ADDRESS` env var in this project instead of requiring a raw IP.
+
+`frontend/Dockerfile` takes `VITE_API_URL` as a **build** arg, not a runtime env var — Vite bakes `import.meta.env.VITE_*` values into the built JS bundle at `npm run build` time, so pointing a built image at a different API means rebuilding it (`docker build --build-arg VITE_API_URL=... .`, or `build.args` in `docker-compose.yml`), not just changing an environment variable on the running container.
+
+Verified against the running containers, not just `docker compose config`: `POST /auth/login` and `GET /accounts/summary` returned correct, real data through the containerized `api`; the containerized `frontend` served `index.html` (checked `/` and `/dashboard` directly — nginx's `try_files` fallback for React Router); and `POST /chat` completed a full `api → OpenRouter → tool call → mcp-server (container) → api (container) → TigerBeetle (container)` round trip, returning the exact same total (`$76,224.82`) `GET /accounts/summary` reported directly — confirming `mcp-server` correctly reaches `api` over the Docker network (`http://api:8080`) rather than just compiling.
 
 ## Seed Data
 
