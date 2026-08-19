@@ -1,13 +1,27 @@
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
 
-/** Thrown for any non-2xx response, carrying the API's own error message. */
+/**
+ * Thrown for any non-2xx response, carrying both the (Spanish) message to
+ * show a user and the API's own original English text — callers that need
+ * to react to a *specific* error (see AMBIGUOUS_EMAIL_ERROR) should match
+ * on `original`, which is stable, rather than the translated `message`,
+ * which is prose meant for display.
+ */
 export class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, original) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.original = original;
   }
 }
+
+// POST /auth/login's specific "this email isn't enough to identify a user"
+// error (see README Login and Duplicate Emails) — exported so the login
+// form can detect exactly this case and reveal the account_number field,
+// without guessing based on the translated message text.
+export const AMBIGUOUS_EMAIL_ERROR =
+  "multiple accounts share this email; account_number is required to log in";
 
 // The API's error strings are plain English (see backend/api/*.go) — the
 // frontend is Spanish throughout, so every message it can actually return
@@ -73,6 +87,7 @@ async function request(path, { method = "GET", body, token } = {}) {
     throw new ApiError(
       translateError(data.error, response.status) || "Ocurrió un error inesperado.",
       response.status,
+      data.error,
     );
   }
 
