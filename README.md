@@ -499,7 +499,7 @@ The model is swappable without touching any code:
 
 ```bash
 OPENROUTER_API_KEY=...
-OPENROUTER_MODEL=anthropic/claude-3.5-sonnet   # or openai/gpt-4o, or any other OpenRouter model id
+OPENROUTER_MODEL=openai/gpt-oss-20b:free   # or any other OpenRouter model id — see https://openrouter.ai/models
 ```
 
 [`backend/openrouter`](backend/openrouter/client.go) is a minimal client for OpenRouter's OpenAI-compatible chat completions API — switching Claude → GPT → anything else OpenRouter proxies is a one-line `.env` change. If `OPENROUTER_API_KEY` is unset, the server logs a warning and `POST /chat` returns `503`; every other endpoint is unaffected.
@@ -514,14 +514,19 @@ go run .                    # main API, :8080
 go run ./cmd/mcp-server      # MCP server, :8081
 ```
 
-### What's verified vs. not yet
+### Verified end-to-end, including a real model
 
-Verified end-to-end against the running stack, using a raw MCP client (bypassing OpenRouter, since that leg needs a real `OPENROUTER_API_KEY`):
+Verified against the running stack in two passes:
 
-- `get_accounts` and `get_balance` correctly return live TigerBeetle balances through the full `MCP client -> mcp-server -> Go API -> TigerBeetle` chain.
-- Ownership is enforced through MCP exactly like a normal request: calling `get_balance` for an account the caller doesn't own returns the same `404` as `GET /accounts/{account_number}/balance` would, surfaced as an MCP tool error (`isError: true`) rather than leaking data.
+1. **MCP layer alone**, with a raw MCP client bypassing OpenRouter: `get_accounts` and `get_balance` correctly return live TigerBeetle balances through the full `MCP client -> mcp-server -> Go API -> TigerBeetle` chain, and ownership is enforced through MCP exactly like a normal request — calling `get_balance` for an account the caller doesn't own returns the same `404` as `GET /accounts/{account_number}/balance` would, surfaced as an MCP tool error (`isError: true`) rather than leaking data.
+2. **The full path with a real model**, `POST /chat` end to end:
 
-**Not yet verified**: the OpenRouter leg itself (`Chat -> OpenRouter -> LLM -> tool call`) — that requires a real `OPENROUTER_API_KEY`, which isn't available in this environment.
+   - `"¿Cuánto dinero tengo?"` → `"Tienes un total de **$13,974.24 USD** en tu cuenta corriente."` — matching the account's live balance exactly.
+   - An indirect phrasing (`"quisiera saber el saldo de mi cuenta de checking"`) resolved correctly too — the model doesn't need the exact target phrase.
+   - Asking for another user's account by number correctly fails to leak anything — the tool call returns `404`, and the model relays that it isn't in "your portfolio" rather than fabricating a balance.
+   - An unrelated question (`"¿Qué es TigerBeetle?"`) gets a normal answer without spuriously invoking a tool.
+
+   Two things had to change from the original plan to get this far: `anthropic/claude-3.5-sonnet` (the example model in this README and `.env.example`) has been retired from OpenRouter's catalog, and the account's testing key had no purchased credits — both blocked every paid model. Testing landed on the free tier (`openai/gpt-oss-20b:free`) instead, which supports tool calling and worked correctly. `OPENROUTER_MODEL` is still just a `.env` value — swapping to any current OpenRouter model id (paid or free, check `https://openrouter.ai/models`) needs no code change, exactly as designed.
 
 ## Environment Variables
 
