@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useChat } from "../hooks/useChat";
 import { Button } from "../components/Button";
 import { Alert } from "../components/Alert";
@@ -10,6 +12,17 @@ const SUGGESTIONS = [
   "¿Cuáles fueron mis últimas transacciones?",
   "Deposita $50 en mi cuenta",
 ];
+
+// react-markdown renders <table> bare; wrap it so a wide table (the
+// assistant often replies with one for transaction history) scrolls
+// horizontally inside the bubble instead of overflowing the page.
+const MARKDOWN_COMPONENTS = {
+  table: ({ children }) => (
+    <div className="chat-table-wrap">
+      <table>{children}</table>
+    </div>
+  ),
+};
 
 export function Chat() {
   const { messages, sending, error, sendMessage, confirmAction } = useChat();
@@ -58,7 +71,15 @@ export function Chat() {
         <ul className="chat-messages">
           {messages.map((message) => (
             <li key={message.id} className={`chat-message chat-message--${message.role}`}>
-              <div className="chat-bubble">{message.content}</div>
+              <div className="chat-bubble">
+                {message.role === "assistant" ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+                    {message.content}
+                  </ReactMarkdown>
+                ) : (
+                  message.content
+                )}
+              </div>
 
               {message.pending && (
                 <div className="chat-confirmation">

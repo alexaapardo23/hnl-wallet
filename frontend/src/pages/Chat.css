@@ -119,6 +119,55 @@
   border-bottom-left-radius: 4px;
 }
 
+/* The assistant's replies are rendered as Markdown (react-markdown) since
+   the model returns tables/bold/lists — e.g. transaction history comes
+   back as a Markdown table. These rules only apply to assistant bubbles;
+   the user's own messages stay plain text. */
+.chat-message--assistant .chat-bubble > *:first-child {
+  margin-top: 0;
+}
+
+.chat-message--assistant .chat-bubble > *:last-child {
+  margin-bottom: 0;
+}
+
+.chat-message--assistant .chat-bubble p {
+  margin: 0 0 10px;
+}
+
+.chat-message--assistant .chat-bubble ul,
+.chat-message--assistant .chat-bubble ol {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.chat-message--assistant .chat-bubble strong {
+  font-weight: 700;
+}
+
+.chat-message--assistant .chat-bubble .chat-table-wrap {
+  overflow-x: auto;
+  margin: 0 0 10px;
+}
+
+.chat-message--assistant .chat-bubble table {
+  border-collapse: collapse;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.chat-message--assistant .chat-bubble th,
+.chat-message--assistant .chat-bubble td {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.chat-message--assistant .chat-bubble th {
+  background: var(--color-bg);
+  font-weight: 700;
+}
+
 .chat-bubble--typing {
   display: flex;
   align-items: center;
