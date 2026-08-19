@@ -302,6 +302,7 @@ All request/response bodies are JSON. Endpoints under `Auth required` expect `Au
 | `GET` | `/accounts/{account_number}/transactions` | Yes | Transfer history for the account, newest first (`?limit=`, default `50`, max `200`) — see note below |
 | `POST` | `/accounts/{account_number}/deposit` | Yes | Credit the account from `SystemAccountID` (`{"amount": 500.25}`, must be `> 0`) — see [Financial Operations](#financial-operations) |
 | `POST` | `/accounts/{account_number}/withdraw` | Yes | Debit the account to `SystemAccountID` (`{"amount": 200.10}`, must be `> 0` and `<=` current balance) — see [Financial Operations](#financial-operations) |
+| `POST` | `/transfers` | Yes | Move money between two accounts (`{"from_account", "to_account", "amount"}`) — `from_account` must belong to the caller, `to_account` doesn't have to — see [Financial Operations](#financial-operations) |
 
 Every `/accounts/...` route is scoped to accounts owned by the authenticated user; another user's account (or a nonexistent one) returns `404` either way, so ownership can't be probed by comparing error responses.
 
@@ -407,6 +408,36 @@ TigerBeetle
 The balance check is the important difference from `deposit`: it's the first operation that can *decrease* a balance, so it's also the first place [the no-new-overdrafts rule](#seed-anomalies-are-not-permitted-going-forward) actually applies. A withdrawal that would take the balance below `$0` is rejected with `422`, regardless of whether the account started positive or was already negative from the seed. This check reads the balance and then submits the transfer as two separate calls — under concurrent requests on the same account there's a race between them (TigerBeetle itself won't reject the transfer, since `debits_must_not_exceed_credits` isn't set), so this is an application-level safeguard against a single caller overdrawing, not a concurrency-safe guarantee.
 
 Implemented in [`backend/api/withdraw.go`](backend/api/withdraw.go).
+
+### Transfers
+
+`POST /transfers` (`{"from_account", "to_account", "amount"}`) moves money between two accounts that don't have to belong to the same user:
+
+```text
+JWT
+  ↓
+identify user
+  ↓
+verify from_account belongs to the user
+  ↓
+verify destination account
+  ↓
+validate amount
+  ↓
+verify funds
+  ↓
+TigerBeetle
+A ──────────→ B
+```
+
+Two checks that don't apply to deposit/withdraw:
+
+- **`to_account` is looked up without an ownership restriction** (`lookupAccountByNumber`, alongside the existing owner-scoped `lookupOwnedAccount` used for `from_account`) — a transfer's destination is legitimately someone else's account, unlike every other endpoint here, which only ever touches the caller's own accounts.
+- **`transfer` vs. `internal_transfer`** is decided by comparing `to_account`'s owner to the caller: same owner → `CodeInternalTransfer` (`104`), different owner → `CodeTransfer` (`103`) — the same distinction `cmd/seed-transactions` makes when replaying `data.json`, so a transfer made through the API and one from the seed are classified identically.
+
+Funds verification reuses the same live-balance check as [Withdrawals](#withdrawals) (and the same TOCTOU caveat under concurrent requests), since a transfer debits `from_account` exactly like a withdrawal — it just credits another account instead of `SystemAccountID`.
+
+Implemented in [`backend/api/transfer.go`](backend/api/transfer.go).
 
 ## AI / MCP Integration
 
