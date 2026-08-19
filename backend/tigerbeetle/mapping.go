@@ -40,3 +40,55 @@ func UUIDString(id tb.Uint128) string {
 func ParseUUIDString(s string) (tb.Uint128, error) {
 	return tb.HexStringToUint128(strings.ReplaceAll(s, "-", ""))
 }
+
+// Account codes. Ledger 700 is the single USD ledger (see README), so
+// account_type is what code distinguishes between accounts on that ledger.
+const (
+	CodeSystem     uint16 = 1  // SystemAccountID only
+	CodeChecking   uint16 = 10
+	CodeSavings    uint16 = 11
+	CodeInvestment uint16 = 12
+)
+
+// AccountTypeCode maps a data.json account_type to its TigerBeetle Code.
+func AccountTypeCode(accountType string) (uint16, error) {
+	switch accountType {
+	case "checking":
+		return CodeChecking, nil
+	case "savings":
+		return CodeSavings, nil
+	case "investment":
+		return CodeInvestment, nil
+	default:
+		return 0, fmt.Errorf("unknown account_type: %q", accountType)
+	}
+}
+
+// AccountNumberToUserData128 encodes a "XXXX-XXXX-XXXX-XXXX" account_number
+// into UserData128 by dropping the dashes and storing the 16 remaining
+// digits as raw ASCII bytes — exactly filling the 16 bytes of a Uint128.
+// This lets an account_number be recovered directly from a TigerBeetle
+// account without a round trip through PostgreSQL.
+func AccountNumberToUserData128(accountNumber string) (tb.Uint128, error) {
+	digits := strings.ReplaceAll(accountNumber, "-", "")
+	if len(digits) != 16 {
+		return tb.Uint128{}, fmt.Errorf(
+			"account_number %q must have 16 digits once dashes are removed, got %d",
+			accountNumber, len(digits),
+		)
+	}
+
+	var bytes [16]byte
+	copy(bytes[:], digits)
+
+	return tb.BytesToUint128(bytes), nil
+}
+
+// UserData128ToAccountNumber decodes a Uint128 produced by
+// AccountNumberToUserData128 back into its "XXXX-XXXX-XXXX-XXXX" form.
+func UserData128ToAccountNumber(userData tb.Uint128) string {
+	bytes := userData.Bytes()
+	digits := string(bytes[:])
+
+	return fmt.Sprintf("%s-%s-%s-%s", digits[0:4], digits[4:8], digits[8:12], digits[12:16])
+}

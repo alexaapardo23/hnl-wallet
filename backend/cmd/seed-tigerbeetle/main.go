@@ -11,10 +11,7 @@ import (
 	"hnl-wallet/backend/tigerbeetle"
 )
 
-const (
-	ledger = 700
-	code   = 10
-)
+const ledger = 700
 
 func main() {
 	dataFile := os.Getenv("DATA_FILE")
@@ -40,14 +37,25 @@ func main() {
 	accounts = append(accounts, tb.Account{
 		ID:     tigerbeetle.SystemAccountID,
 		Ledger: ledger,
-		Code:   code,
+		Code:   tigerbeetle.CodeSystem,
 	})
 
-	for i := range data.Accounts {
+	for i, account := range data.Accounts {
+		accountCode, err := tigerbeetle.AccountTypeCode(account.AccountType)
+		if err != nil {
+			log.Fatalf("account %s: %v", account.AccountNumber, err)
+		}
+
+		userData128, err := tigerbeetle.AccountNumberToUserData128(account.AccountNumber)
+		if err != nil {
+			log.Fatalf("account %s: %v", account.AccountNumber, err)
+		}
+
 		accounts = append(accounts, tb.Account{
-			ID:     tigerbeetle.AccountID(i),
-			Ledger: ledger,
-			Code:   code,
+			ID:          tigerbeetle.AccountID(i),
+			Ledger:      ledger,
+			Code:        accountCode,
+			UserData128: userData128,
 		})
 	}
 
