@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { useAccountsSummary } from "../hooks/useAccountsSummary";
 import { Button } from "../components/Button";
@@ -73,18 +74,20 @@ export function Dashboard() {
           {!loading && data && (
             <ul className="accounts-list">
               {data.accounts.map((account) => (
-                <li key={account.account_number} className="account-row">
-                  <div className="account-info">
-                    <span className="account-type">
-                      {ACCOUNT_TYPE_LABELS[account.account_type] ?? account.account_type}
+                <li key={account.account_number}>
+                  <Link to={`/accounts/${account.account_number}`} className="account-row">
+                    <div className="account-info">
+                      <span className="account-type">
+                        {ACCOUNT_TYPE_LABELS[account.account_type] ?? account.account_type}
+                      </span>
+                      <span className="account-number">
+                        {maskAccountNumber(account.account_number)}
+                      </span>
+                    </div>
+                    <span className="account-balance">
+                      {currencyFormatter.format(account.balance)}
                     </span>
-                    <span className="account-number">
-                      {maskAccountNumber(account.account_number)}
-                    </span>
-                  </div>
-                  <span className="account-balance">
-                    {currencyFormatter.format(account.balance)}
-                  </span>
+                  </Link>
                 </li>
               ))}
 

@@ -23,6 +23,21 @@
  * @property {number} total_balance
  * @property {string} currency
  * @property {AccountSummary[]} accounts
+ *
+ * @typedef {Object} AccountDetail
+ * @property {string} account_number
+ * @property {string} currency
+ * @property {string} account_type
+ * @property {number} initial_balance
+ * @property {number} balance
+ *
+ * @typedef {Object} Transaction
+ * @property {string} id
+ * @property {string} type
+ * @property {"incoming"|"outgoing"} direction
+ * @property {number} amount
+ * @property {string} counterparty_account_number
+ * @property {string} timestamp
  */
 
 export {};

@@ -54,4 +54,24 @@ export const accountsService = {
    * @returns {Promise<import('../types').AccountsSummary>}
    */
   summary: (token) => request("/accounts/summary", { token }),
+
+  /** @returns {Promise<import('../types').AccountDetail>} */
+  detail: (token, accountNumber) => request(`/accounts/${accountNumber}`, { token }),
+
+  /** @returns {Promise<import('../types').Transaction[]>} */
+  transactions: (token, accountNumber, limit = 10) =>
+    request(`/accounts/${accountNumber}/transactions?limit=${limit}`, { token }),
+
+  deposit: (token, accountNumber, amount) =>
+    request(`/accounts/${accountNumber}/deposit`, { method: "POST", token, body: { amount } }),
+
+  withdraw: (token, accountNumber, amount) =>
+    request(`/accounts/${accountNumber}/withdraw`, { method: "POST", token, body: { amount } }),
+
+  transfer: (token, fromAccount, toAccount, amount) =>
+    request("/transfers", {
+      method: "POST",
+      token,
+      body: { from_account: fromAccount, to_account: toAccount, amount },
+    }),
 };

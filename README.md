@@ -339,6 +339,28 @@ Other details: account numbers are masked to their last 4 digits (`•••• 
 
 Verified in a real browser against the running API, logged in as a real seed user with three accounts (checking, savings, investment): the rendered total and all three per-account balances matched `GET /accounts/summary`'s response exactly (`$76,074.82` total; `$23,503.34` / `$43,629.32` / `$8,942.16` for investment / savings / checking respectively), and the layout was checked at both desktop and mobile viewport widths.
 
+### Account Detail
+
+Clicking an account on the Dashboard opens `/accounts/:accountNumber` ([`src/pages/AccountDetail.jsx`](frontend/src/pages/AccountDetail.jsx)) — account type, masked number, currency, current balance, Deposit/Withdraw/Transfer buttons, and recent transactions:
+
+```text
+Checking
+•••• 0571
+$12,430.00 USD
+[ Deposit ] [ Withdraw ] [ Transfer ]
+Recent transactions
+────────────────────────────
+Deposit              +$500
+Transfer             -$120
+Transfer             +$250
+```
+
+`useAccountDetail` ([`src/hooks/useAccountDetail.js`](frontend/src/hooks/useAccountDetail.js)) fetches `GET /accounts/{account_number}` and `GET /accounts/{account_number}/transactions` together — the same "never compute a balance in React" rule as the Dashboard applies here too: `balance` is rendered exactly as the API returns it, and each transaction's `+`/`-` sign comes directly from the API's own `direction` field (`incoming`/`outgoing`), not from comparing amounts or account numbers client-side.
+
+Each button opens `OperationModal` ([`src/components/OperationModal.jsx`](frontend/src/components/OperationModal.jsx)) — one shared modal for all three operations (amount, plus a destination account field for Transfer only), calling `POST /accounts/{account_number}/deposit`, `.../withdraw`, or `POST /transfers` directly — these are the same endpoints from [Financial Operations](#financial-operations), executed immediately on submit, **not** the signed confirmation-token flow `POST /chat` uses. That flow exists specifically to guard against an LLM triggering money movement on its own initiative mid-conversation; a human directly clicking "Deposit," typing an amount, and clicking submit in a dedicated form *is* the confirmation — there's no third party whose intent needs double-checking. On success, the modal closes and `useAccountDetail`'s `reload()` re-fetches both the account and its transactions, so the new balance shown is freshly read from TigerBeetle, not computed from the pre-operation balance plus the amount.
+
+Verified in a real browser against the running API: a $100.00 deposit moved the balance from `$23,503.34` to `$23,603.34` exactly and appeared at the top of the transaction list immediately; a withdrawal for far more than the balance was rejected inline with the API's own `insufficient funds` message, the modal stayed open, and the balance was confirmed unchanged; a $50.00 transfer to another of the same user's accounts moved the balance to `$23,553.34` exactly and was correctly labeled `Internal Transfer` (see [Transfers](#transfers) for why) rather than `Transfer`.
+
 ### Talking to the API from the browser
 
 The frontend (Vite's dev server, `http://localhost:5173` by default) and the API (`http://localhost:8080`) are different origins, so the API needs to explicitly allow the browser to call it — see [`backend/api/cors.go`](backend/api/cors.go) and the `FRONTEND_URL` environment variable below.
