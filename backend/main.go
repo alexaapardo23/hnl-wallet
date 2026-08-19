@@ -1,27 +1,32 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net/http"
+	"os"
 
+	"github.com/joho/godotenv"
+
+	"hnl-wallet/backend/api"
 	"hnl-wallet/backend/database"
 	tbClient "hnl-wallet/backend/tigerbeetle"
 )
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "HNL Wallet API is running")
-}
-
 func main() {
-	db, err := database.ConnectPostgres()
+	if err := godotenv.Load("../.env"); err != nil {
+		log.Printf("warning: could not load .env: %v", err)
+	}
+
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable is not set")
+	}
+
+	db, err := database.NewPostgresPool()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
-
-	log.Println("Connected to PostgreSQL")
 
 	tb, err := tbClient.NewClient()
 	if err != nil {
@@ -31,11 +36,15 @@ func main() {
 
 	log.Println("Connected to TigerBeetle")
 
-	http.HandleFunc("/health", healthHandler)
+	server := &api.Server{
+		DB:        db,
+		TB:        tb,
+		JWTSecret: []byte(jwtSecret),
+	}
 
 	log.Println("HNL Wallet API running on :8080")
 
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	if err := http.ListenAndServe(":8080", api.NewRouter(server)); err != nil {
 		log.Fatal(err)
 	}
 }
