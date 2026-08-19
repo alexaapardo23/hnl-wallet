@@ -294,9 +294,16 @@ All request/response bodies are JSON. Endpoints under `Auth required` expect `Au
 | `GET` | `/health` | No | Liveness check |
 | `POST` | `/auth/register` | No | Create a new user — see [New registrations require a unique email](#new-registrations-require-a-unique-email) |
 | `POST` | `/auth/login` | No | Authenticate and receive a JWT — see [Login and duplicate emails](#login-and-duplicate-emails) |
+| `GET` | `/me` | Yes | The authenticated user's own profile (`id`, `email`, `full_name`, `created_at`) |
 | `POST` | `/accounts` | Yes | Open a new account (`{"account_type": "checking" \| "savings" \| "investment"}`) for the authenticated user, balance starts at `0` |
 | `GET` | `/accounts` | Yes | List the authenticated user's accounts |
-| `GET` | `/accounts/{account_number}/balance` | Yes | Live balance from TigerBeetle for an account owned by the authenticated user (`404` otherwise) |
+| `GET` | `/accounts/{account_number}` | Yes | PostgreSQL metadata (`account_type`, `currency`, `initial_balance`) plus live `balance` from TigerBeetle, in one call |
+| `GET` | `/accounts/{account_number}/balance` | Yes | Live balance from TigerBeetle only — lighter-weight than the detail endpoint above, for polling |
+| `GET` | `/accounts/{account_number}/transactions` | Yes | Transfer history for the account, newest first (`?limit=`, default `50`, max `200`) — see note below |
+
+Every `/accounts/...` route is scoped to accounts owned by the authenticated user; another user's account (or a nonexistent one) returns `404` either way, so ownership can't be probed by comparing error responses.
+
+`GET /accounts/{account_number}/transactions` reads directly from **TigerBeetle** (`GetAccountTransfers`), not the PostgreSQL `transactions` table. That table is only ever populated once, by `cmd/seed` from `data/data.json` — it doesn't get new rows from anything created through this API — so it would silently miss real activity if this endpoint used it instead. Each entry also reports `direction` (`incoming`/`outgoing`) and `counterparty_account_number` (or `"EXTERNAL"`) relative to the requested account, and includes the [initial funding transfer](#initial-balance-funding) alongside `data.json`'s transactions, since it's a real TigerBeetle transfer too.
 
 Implemented in [`backend/api`](backend/api).
 
@@ -345,6 +352,13 @@ This was checked against `data/data.json` (1605 accounts, 6429 transactions, all
 - **Negative balances**: 70 of 1605 accounts (4.4%) end up with a negative `calculated_balance` (as low as **-$10,933.69**), spread evenly across account types (savings 4.2%, checking 4.1%, investment 6.4%).
 
 The dataset does not prevent overdrafts — transaction amounts are not capped by available balance. This is assumed to be intentional test data, since TigerBeetle supports enforcing non-negative balances via account flags (e.g. `debits_must_not_exceed_credits`), which is not yet wired up in this project.
+
+### Seed anomalies are not permitted going forward
+
+Both anomalies documented above — duplicate emails and negative-balance overdrafts — are **only tolerated in the seed dataset**, never for data created through the API:
+
+- Duplicate emails: enforced already — see [New registrations require a unique email](#new-registrations-require-a-unique-email). `POST /auth/register` rejects any email already in use, seed or not.
+- Overdrafts: accounts created via `POST /accounts` start at a `$0` balance and there is no transfer-creation endpoint yet (`POST /accounts` and the [three seed programs](#seed-data) are the only ways an account's balance changes today), so overdraft protection has nothing to enforce yet. Once a transfer/transaction-creation endpoint is added, it must set `debits_must_not_exceed_credits` (or reject in application code) so newly created accounts can't go negative the way seeded ones intentionally can.
 
 ## AI / MCP Integration
 

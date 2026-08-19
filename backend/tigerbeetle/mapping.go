@@ -116,3 +116,22 @@ const (
 	CodeTransfer         uint16 = 103 // account -> another user's account
 	CodeInternalTransfer uint16 = 104 // account -> the same user's other account
 )
+
+// TransferTypeName maps a transfer Code back to the data.json-style type
+// string, for API responses that surface transfer history.
+func TransferTypeName(code uint16) string {
+	switch code {
+	case CodeInitialBalance:
+		return "initial_balance"
+	case CodeDeposit:
+		return "deposit"
+	case CodeWithdrawal:
+		return "withdrawal"
+	case CodeTransfer:
+		return "transfer"
+	case CodeInternalTransfer:
+		return "internal_transfer"
+	default:
+		return "unknown"
+	}
+}

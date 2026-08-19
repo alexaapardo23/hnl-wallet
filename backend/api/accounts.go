@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -154,27 +155,76 @@ func (s *Server) listAccountsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, accounts)
 }
 
+// ownedAccount is an account's PostgreSQL metadata plus its resolved
+// TigerBeetle ID, scoped to a single owning user.
+type ownedAccount struct {
+	AccountNumber  string
+	InitialBalance float64
+	Currency       string
+	AccountType    string
+	TigerBeetleID  tb.Uint128
+}
+
+var errAccountNotFound = errors.New("account not found")
+
+// lookupOwnedAccount resolves account_number to its metadata and TigerBeetle
+// ID, scoped to userID so one user can never read another's account —
+// errAccountNotFound covers both "doesn't exist" and "exists but isn't
+// yours" (deliberately indistinguishable to the caller).
+func (s *Server) lookupOwnedAccount(ctx context.Context, accountNumber, userID string) (ownedAccount, error) {
+	var a ownedAccount
+	var tigerbeetleAccountID string
+
+	err := s.DB.QueryRow(
+		ctx,
+		`
+		SELECT account_number, initial_balance, currency, account_type, tigerbeetle_account_id
+		FROM accounts
+		WHERE account_number = $1 AND user_id = $2
+		`,
+		accountNumber, userID,
+	).Scan(&a.AccountNumber, &a.InitialBalance, &a.Currency, &a.AccountType, &tigerbeetleAccountID)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ownedAccount{}, errAccountNotFound
+	}
+	if err != nil {
+		return ownedAccount{}, err
+	}
+
+	a.TigerBeetleID, err = tigerbeetle.ParseUUIDString(tigerbeetleAccountID)
+	return a, err
+}
+
+// balanceCents fetches an account's live balance from TigerBeetle:
+// CreditsPosted - DebitsPosted, not a stored column — see README Financial
+// Data Model: TigerBeetle is the source of truth.
+func (s *Server) balanceCents(id tb.Uint128) (int64, error) {
+	tbAccounts, err := s.TB.LookupAccounts([]tb.Uint128{id})
+	if err != nil {
+		return 0, err
+	}
+	if len(tbAccounts) == 0 {
+		return 0, fmt.Errorf("account %s not found in TigerBeetle", id.String())
+	}
+
+	credits := tbAccounts[0].CreditsPosted.BigInt()
+	debits := tbAccounts[0].DebitsPosted.BigInt()
+
+	return credits.Sub(credits, debits).Int64(), nil
+}
+
 type balanceResponse struct {
 	AccountNumber string  `json:"account_number"`
 	Balance       float64 `json:"balance"`
 	Currency      string  `json:"currency"`
 }
 
-// accountBalanceHandler returns an account's live balance computed from
-// TigerBeetle (CreditsPosted - DebitsPosted), not a stored column — see
-// README Financial Data Model: TigerBeetle is the source of truth.
+// accountBalanceHandler returns an account's live TigerBeetle balance only —
+// a lightweight endpoint for polling, alongside the fuller accountDetailHandler.
 func (s *Server) accountBalanceHandler(w http.ResponseWriter, r *http.Request) {
-	userID := userIDFromContext(r)
-	accountNumber := r.PathValue("account_number")
-
-	var tigerbeetleAccountID string
-	err := s.DB.QueryRow(
-		r.Context(),
-		`SELECT tigerbeetle_account_id FROM accounts WHERE account_number = $1 AND user_id = $2`,
-		accountNumber, userID,
-	).Scan(&tigerbeetleAccountID)
-
-	if errors.Is(err, pgx.ErrNoRows) {
+	account, err := s.lookupOwnedAccount(r.Context(), r.PathValue("account_number"), userIDFromContext(r))
+	if errors.Is(err, errAccountNotFound) {
 		writeError(w, http.StatusNotFound, "account not found")
 		return
 	}
@@ -183,25 +233,51 @@ func (s *Server) accountBalanceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tbID, err := tigerbeetle.ParseUUIDString(tigerbeetleAccountID)
+	cents, err := s.balanceCents(account.TigerBeetleID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to decode TigerBeetle account ID")
-		return
-	}
-
-	tbAccounts, err := s.TB.LookupAccounts([]tb.Uint128{tbID})
-	if err != nil || len(tbAccounts) == 0 {
 		writeError(w, http.StatusInternalServerError, "failed to fetch balance from TigerBeetle")
 		return
 	}
 
-	credits := tbAccounts[0].CreditsPosted.BigInt()
-	debits := tbAccounts[0].DebitsPosted.BigInt()
-	cents := credits.Sub(credits, debits).Int64()
-
 	writeJSON(w, http.StatusOK, balanceResponse{
-		AccountNumber: accountNumber,
+		AccountNumber: account.AccountNumber,
 		Balance:       float64(cents) / 100,
 		Currency:      "USD",
+	})
+}
+
+type accountDetailResponse struct {
+	AccountNumber  string  `json:"account_number"`
+	Currency       string  `json:"currency"`
+	AccountType    string  `json:"account_type"`
+	InitialBalance float64 `json:"initial_balance"`
+	Balance        float64 `json:"balance"`
+}
+
+// accountDetailHandler returns an account's PostgreSQL metadata together
+// with its live TigerBeetle balance in a single call.
+func (s *Server) accountDetailHandler(w http.ResponseWriter, r *http.Request) {
+	account, err := s.lookupOwnedAccount(r.Context(), r.PathValue("account_number"), userIDFromContext(r))
+	if errors.Is(err, errAccountNotFound) {
+		writeError(w, http.StatusNotFound, "account not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to look up account")
+		return
+	}
+
+	cents, err := s.balanceCents(account.TigerBeetleID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to fetch balance from TigerBeetle")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, accountDetailResponse{
+		AccountNumber:  account.AccountNumber,
+		Currency:       account.Currency,
+		AccountType:    account.AccountType,
+		InitialBalance: account.InitialBalance,
+		Balance:        float64(cents) / 100,
 	})
 }
