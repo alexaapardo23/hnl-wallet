@@ -27,12 +27,6 @@ type accountResponse struct {
 }
 
 // createAccountHandler opens a new account for the authenticated user.
-//
-// account_number and the TigerBeetle account ID are both drawn from
-// tigerbeetle_account_seq (starting at 1607, right after the 1605 seeded
-// accounts occupying IDs 2..1606 — see README Account ID Mapping), keeping
-// every account's ID small and human-readable instead of switching to
-// TigerBeetle's random ID() generator only for accounts created here.
 func (s *Server) createAccountHandler(w http.ResponseWriter, r *http.Request) {
 	var req createAccountRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -46,27 +40,43 @@ func (s *Server) createAccountHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := userIDFromContext(r)
-	ctx := r.Context()
+	account, err := s.createAccount(r.Context(), userIDFromContext(r), req.AccountType, accountCode)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to open account")
+		return
+	}
 
+	writeJSON(w, http.StatusCreated, account)
+}
+
+// createAccount opens a new TigerBeetle + PostgreSQL account for userID.
+// Shared by createAccountHandler and registerHandler (a new user's first
+// account, opened as part of registration) — the caller is responsible for
+// validating accountType/accountCode first (tigerbeetle.AccountTypeCode),
+// so every error returned here is an infrastructure failure, not a bad
+// request.
+//
+// account_number and the TigerBeetle account ID are both drawn from
+// tigerbeetle_account_seq (starting at 1607, right after the 1605 seeded
+// accounts occupying IDs 2..1606 — see README Account ID Mapping), keeping
+// every account's ID small and human-readable instead of switching to
+// TigerBeetle's random ID() generator only for accounts created here.
+func (s *Server) createAccount(ctx context.Context, userID, accountType string, accountCode uint16) (accountResponse, error) {
 	var sequence uint64
 	if err := s.DB.QueryRow(ctx, `SELECT nextval('tigerbeetle_account_seq')`).Scan(&sequence); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to allocate account ID")
-		return
+		return accountResponse{}, fmt.Errorf("failed to allocate account ID: %w", err)
 	}
 
 	tbAccountID := tb.ToUint128(sequence)
 
 	accountNumber, err := randomAccountNumber(sequence)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate account number")
-		return
+		return accountResponse{}, fmt.Errorf("failed to generate account number: %w", err)
 	}
 
 	userData128, err := tigerbeetle.AccountNumberToUserData128(accountNumber)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to encode account number")
-		return
+		return accountResponse{}, fmt.Errorf("failed to encode account number: %w", err)
 	}
 
 	results, err := s.TB.CreateAccounts([]tb.Account{{
@@ -76,13 +86,11 @@ func (s *Server) createAccountHandler(w http.ResponseWriter, r *http.Request) {
 		UserData128: userData128,
 	}})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create TigerBeetle account")
-		return
+		return accountResponse{}, fmt.Errorf("failed to create TigerBeetle account: %w", err)
 	}
 	for _, result := range results {
 		if result.Status != tb.AccountCreated {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("TigerBeetle rejected account: %s", result.Status))
-			return
+			return accountResponse{}, fmt.Errorf("TigerBeetle rejected account: %s", result.Status)
 		}
 	}
 
@@ -92,19 +100,18 @@ func (s *Server) createAccountHandler(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO accounts (account_number, user_id, initial_balance, currency, account_type, tigerbeetle_account_id)
 		VALUES ($1, $2, 0, 'USD', $3, $4)
 		`,
-		accountNumber, userID, req.AccountType, tigerbeetle.UUIDString(tbAccountID),
+		accountNumber, userID, accountType, tigerbeetle.UUIDString(tbAccountID),
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save account")
-		return
+		return accountResponse{}, fmt.Errorf("failed to save account: %w", err)
 	}
 
-	writeJSON(w, http.StatusCreated, accountResponse{
+	return accountResponse{
 		AccountNumber:  accountNumber,
 		InitialBalance: 0,
 		Currency:       "USD",
-		AccountType:    req.AccountType,
-	})
+		AccountType:    accountType,
+	}, nil
 }
 
 // randomAccountNumber builds a "4001-XXXX-XXXX-NNNN" account number

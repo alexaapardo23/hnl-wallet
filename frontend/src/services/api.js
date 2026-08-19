@@ -104,6 +104,18 @@ export const authService = {
         : { email, password },
     }),
 
+  /**
+   * Creates a user and opens their first account (account_type) in one
+   * call — see README "Crear cuenta bancaria al registrar usuario" — and
+   * logs them in immediately, same response shape as login.
+   * @returns {Promise<import('../types').RegisterResponse>}
+   */
+  register: (email, password, fullName, accountType) =>
+    request("/auth/register", {
+      method: "POST",
+      body: { email, password, full_name: fullName, account_type: accountType },
+    }),
+
   /** @returns {Promise<import('../types').User>} */
   me: (token) => request("/me", { token }),
 };

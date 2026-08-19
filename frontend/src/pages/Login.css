@@ -36,3 +36,13 @@
   font-size: 14px;
   color: var(--color-text-muted);
 }
+
+.login-footer {
+  text-align: center;
+  font-size: 14px;
+  color: var(--color-text-muted);
+}
+
+.login-footer a {
+  font-weight: 600;
+}

@@ -347,6 +347,26 @@ Dashboard
 
 Verified in a real browser against the running API: successful login for a non-duplicate seed user redirects to `/dashboard` and renders the correct name/email; a wrong-password error renders inline on `/login`; the session survives a full page reload (re-validated via `GET /me`); logout clears it; visiting `/dashboard` directly with no session redirects to `/login`; and — the fix itself — submitting one of the duplicate-email accounts with no `account_number` revealed the field with the disambiguation error shown, and resubmitting with the correct `account_number` (`4001-8551-6335-0159`) logged in successfully and landed on that exact account's Dashboard.
 
+### Register
+
+`/register` ([`src/pages/Register.jsx`](frontend/src/pages/Register.jsx), linked from `/login` both ways) — full name, email, password, and an account type picker (Corriente/Ahorros/Inversión), one `POST /auth/register` call:
+
+```text
+Register
+  ↓
+POST /auth/register  (crea usuario + cuenta bancaria)
+  ↓
+JWT
+  ↓
+guardar sesión
+  ↓
+Dashboard
+```
+
+`AuthContext.register` ([`src/context/AuthContext.jsx`](frontend/src/context/AuthContext.jsx)) is `login`'s twin — same `{token, user}` handling, same `localStorage` persistence — plus the extra `account` field the register response carries, which the form doesn't need to do anything with itself: landing on `/dashboard` right after already triggers `GET /accounts/summary`, which picks up the new account on its own.
+
+Verified in a real browser against the running API: submitting the form created the user and a real TigerBeetle account together, logged in immediately, and landed on `/dashboard` showing exactly that new account (correct type, `$0.00` balance, matching what was picked in the form); registering the same email again rendered `Este email ya está registrado.` inline, matching `POST /auth/register`'s existing `409` behavior.
+
 ### Dashboard
 
 `/dashboard` — total balance, then every account with its own balance and a masked account number:
@@ -485,7 +505,7 @@ All request/response bodies are JSON. Endpoints under `Auth required` expect `Au
 | Method | Path | Auth required | Description |
 |---|---|---|---|
 | `GET` | `/health` | No | Liveness check |
-| `POST` | `/auth/register` | No | Create a new user — see [New registrations require a unique email](#new-registrations-require-a-unique-email) |
+| `POST` | `/auth/register` | No | Create a user + their first account, and log them in (`{token, user, account}`, same shape as login plus `account`) — see [New registrations require a unique email](#new-registrations-require-a-unique-email) |
 | `POST` | `/auth/login` | No | Authenticate and receive a JWT — see [Login and duplicate emails](#login-and-duplicate-emails) |
 | `GET` | `/me` | Yes | The authenticated user's own profile (`id`, `email`, `full_name`, `created_at`) |
 | `POST` | `/accounts` | Yes | Open a new account (`{"account_type": "checking" \| "savings" \| "investment"}`) for the authenticated user, balance starts at `0` |
@@ -516,7 +536,11 @@ Since `user_id` (not `email`) is the true internal identity, and `account_number
 
 ### New registrations require a unique email
 
-`POST /auth/register` (`{email, password, full_name}`) enforces email uniqueness **at the application layer**, not the database — the database intentionally has no constraint, per the section above. Registration checks for an existing `email` before inserting and returns `409 Conflict` if it's already taken, so **new** users can never end up with a duplicate email, while the legacy seed duplicates remain untouched.
+`POST /auth/register` (`{email, password, full_name, account_type}`) enforces email uniqueness **at the application layer**, not the database — the database intentionally has no constraint, per the section above. Registration checks for an existing `email` before inserting and returns `409 Conflict` if it's already taken, so **new** users can never end up with a duplicate email, while the legacy seed duplicates remain untouched.
+
+**Registration also opens the user's first account and logs them in**, in the same request — `account_type` is required (validated with the same rule as `POST /accounts`, before the user row is even inserted, so a bad value never leaves an accountless user behind) and the response is shaped like `POST /auth/login`'s (`{token, user}`) plus the new `account`, so the frontend goes straight from the registration form to an authenticated Dashboard without a separate login call. Internally, both `POST /accounts` and registration's account-opening step call the same `createAccount` helper ([`backend/api/accounts.go`](backend/api/accounts.go)) — there's only one place that allocates a `tigerbeetle_account_seq` ID, calls `TB.CreateAccounts`, and inserts the PostgreSQL row.
+
+One real gap this closed: the frontend originally only exposed `email` + `password` on `/login` and had no `/register` page at all — so a user could never open a first account through the UI, and (per [Login and duplicate emails](#login-and-duplicate-emails) below) a duplicate-email seed user couldn't log in either, since there was nowhere to type an `account_number`. Both are now fixed: [`Register.jsx`](frontend/src/pages/Register.jsx) (linked from `/login`, and back) collects `full_name`/`email`/`password`/`account_type` and calls `POST /auth/register` directly, and `/login` reveals its `account_number` field on demand (see below).
 
 Passwords are hashed with bcrypt before being stored. Seed users keep their original plaintext passwords (e.g. `"Isabel2024!"`) — [`auth.VerifyPassword`](backend/auth/password.go) detects the bcrypt prefix to compare either form correctly, rather than migrating (and thereby altering) seed data.
 

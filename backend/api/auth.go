@@ -5,31 +5,42 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"hnl-wallet/backend/auth"
+	"hnl-wallet/backend/tigerbeetle"
 )
 
-type registerRequest struct {
+// userSummary is the shape of a user handed back to the frontend after
+// register/login — never includes the password.
+type userSummary struct {
+	ID       string `json:"id"`
 	Email    string `json:"email"`
-	Password string `json:"password"`
 	FullName string `json:"full_name"`
 }
 
-type registerResponse struct {
-	ID        string    `json:"id"`
-	Email     string    `json:"email"`
-	FullName  string    `json:"full_name"`
-	CreatedAt time.Time `json:"created_at"`
+type registerRequest struct {
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	FullName    string `json:"full_name"`
+	AccountType string `json:"account_type"`
 }
 
-// registerHandler creates a new user. Unlike the seed dataset — which
-// intentionally contains users sharing an email (see README Authentication)
-// — new registrations must use a unique email, enforced here at the
-// application layer since the database no longer has a UNIQUE constraint
-// on users.email.
+type registerResponse struct {
+	Token   string          `json:"token"`
+	User    userSummary     `json:"user"`
+	Account accountResponse `json:"account"`
+}
+
+// registerHandler creates a new user, opens their first account
+// (account_type), and logs them in — same JWT-issuing shape as
+// loginHandler, so the frontend can go straight from the registration form
+// to an authenticated Dashboard without a separate login step. Unlike the
+// seed dataset — which intentionally contains users sharing an email (see
+// README Authentication) — new registrations must use a unique email,
+// enforced here at the application layer since the database no longer has
+// a UNIQUE constraint on users.email.
 func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -53,10 +64,19 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validated before touching the database at all: better to reject a bad
+	// account_type up front than to create the user and only then discover
+	// their first account can't be opened.
+	accountCode, err := tigerbeetle.AccountTypeCode(req.AccountType)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "account_type must be one of: checking, savings, investment")
+		return
+	}
+
 	ctx := r.Context()
 
 	var exists bool
-	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`, req.Email).Scan(&exists)
+	err = s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`, req.Email).Scan(&exists)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check email availability")
 		return
@@ -72,16 +92,16 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var resp registerResponse
+	var userID string
 	err = s.DB.QueryRow(
 		ctx,
 		`
 		INSERT INTO users (id, email, password, full_name, created_at)
 		VALUES (gen_random_uuid(), $1, $2, $3, now())
-		RETURNING id, email, full_name, created_at
+		RETURNING id
 		`,
 		req.Email, hashedPassword, req.FullName,
-	).Scan(&resp.ID, &resp.Email, &resp.FullName, &resp.CreatedAt)
+	).Scan(&userID)
 
 	// A concurrent request could win the race between the existence check
 	// and this insert; the UNIQUE-less schema won't catch it, but we only
@@ -92,7 +112,28 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, resp)
+	account, err := s.createAccount(ctx, userID, req.AccountType, accountCode)
+	if err != nil {
+		// The user row exists at this point with no account — same
+		// partial-failure shape createAccountHandler already has if
+		// TigerBeetle succeeds but the PostgreSQL insert fails; there's no
+		// cross-system transaction spanning PostgreSQL and TigerBeetle here
+		// to roll back to.
+		writeError(w, http.StatusInternalServerError, "user created but failed to open account")
+		return
+	}
+
+	token, err := auth.GenerateToken(s.JWTSecret, userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, registerResponse{
+		Token:   token,
+		User:    userSummary{ID: userID, Email: req.Email, FullName: req.FullName},
+		Account: account,
+	})
 }
 
 type loginRequest struct {
@@ -102,12 +143,8 @@ type loginRequest struct {
 }
 
 type loginResponse struct {
-	Token string `json:"token"`
-	User  struct {
-		ID       string `json:"id"`
-		Email    string `json:"email"`
-		FullName string `json:"full_name"`
-	} `json:"user"`
+	Token string      `json:"token"`
+	User  userSummary `json:"user"`
 }
 
 var errInvalidCredentials = errors.New("invalid email or password")

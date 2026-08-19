@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { AMBIGUOUS_EMAIL_ERROR } from "../services/api";
 import { Button } from "../components/Button";
@@ -97,6 +97,10 @@ export function Login() {
         <Button type="submit" block loading={loading}>
           {loading ? "Ingresando..." : "Iniciar sesión"}
         </Button>
+
+        <p className="login-footer">
+          ¿No tienes cuenta? <Link to="/register">Regístrate</Link>
+        </p>
       </form>
     </div>
   );

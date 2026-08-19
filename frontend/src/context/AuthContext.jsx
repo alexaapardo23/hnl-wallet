@@ -40,6 +40,18 @@ export function AuthProvider({ children }) {
     return data;
   }, []);
 
+  // Registration opens the user's first account server-side (see
+  // README "Crear cuenta bancaria al registrar usuario") and returns the
+  // same {token, user} shape as login, so this is login's twin rather than
+  // a separate flow the caller has to chain into a login call itself.
+  const register = useCallback(async (email, password, fullName, accountType) => {
+    const data = await authService.register(email, password, fullName, accountType);
+    localStorage.setItem(STORAGE_KEY, data.token);
+    setUser(data.user);
+    setToken(data.token);
+    return data;
+  }, []);
+
   const logout = useCallback(() => {
     localStorage.removeItem(STORAGE_KEY);
     setToken(null);
@@ -47,7 +59,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ token, user, loading, login, logout }}>
+    <AuthContext.Provider value={{ token, user, loading, login, register, logout }}>
       {children}
     </AuthContext.Provider>
   );

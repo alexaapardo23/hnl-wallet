@@ -48,6 +48,11 @@
  * @property {boolean} [requires_confirmation]
  * @property {string} [confirmation_token]
  * @property {PendingAction} [pending_action]
+ *
+ * @typedef {Object} RegisterResponse
+ * @property {string} token
+ * @property {{ id: string, email: string, full_name: string }} user
+ * @property {AccountSummary} account
  */
 
 export {};
