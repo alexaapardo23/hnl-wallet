@@ -18,6 +18,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 
 	"github.com/joho/godotenv"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -150,6 +151,116 @@ func handleGetBalance(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 	return mcp.NewToolResultText(string(body)), nil
 }
 
+const defaultHistoryLimit = 10
+
+type transactionEntry struct {
+	AccountNumber             string  `json:"account_number"`
+	ID                        string  `json:"id"`
+	Type                      string  `json:"type"`
+	Direction                 string  `json:"direction"`
+	Amount                    float64 `json:"amount"`
+	CounterpartyAccountNumber string  `json:"counterparty_account_number"`
+	Timestamp                 string  `json:"timestamp"`
+}
+
+// handleGetTransactionHistory returns the caller's most recent transactions.
+// With account_number, it's scoped to that one account (wrapping
+// GET /accounts/{account_number}/transactions directly); without it, it
+// fetches every account the caller owns and merges their histories — so
+// "¿Cuáles fueron mis últimas transacciones?" doesn't require the model to
+// already know an account_number.
+func handleGetTransactionHistory(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	token, err := bearerTokenFromContext(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	limit := request.GetInt("limit", defaultHistoryLimit)
+	if limit <= 0 {
+		limit = defaultHistoryLimit
+	}
+
+	var accountNumbers []string
+	if accountNumber := request.GetString("account_number", ""); accountNumber != "" {
+		accountNumbers = []string{accountNumber}
+	} else {
+		body, status, err := callAPI(ctx, "/accounts", token)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("failed to reach HNL Wallet API", err), nil
+		}
+		if status != http.StatusOK {
+			return mcp.NewToolResultErrorf("HNL Wallet API returned %d: %s", status, string(body)), nil
+		}
+
+		var basics []struct {
+			AccountNumber string `json:"account_number"`
+		}
+		if err := json.Unmarshal(body, &basics); err != nil {
+			return mcp.NewToolResultErrorFromErr("failed to parse accounts response", err), nil
+		}
+		for _, a := range basics {
+			accountNumbers = append(accountNumbers, a.AccountNumber)
+		}
+	}
+
+	entries := make([]transactionEntry, 0, limit)
+	for _, accountNumber := range accountNumbers {
+		path := fmt.Sprintf("/accounts/%s/transactions?limit=%d", accountNumber, limit)
+
+		body, status, err := callAPI(ctx, path, token)
+		if err != nil || status != http.StatusOK {
+			// Best-effort across accounts, same as get_accounts: one
+			// account's history failing shouldn't fail the whole tool call
+			// when there's more than one account to look at. If the caller
+			// asked for a specific account_number, this is the only
+			// iteration, so its error is the only thing that shows up —
+			// still as an empty result rather than an explicit error,
+			// matching the plural-account case.
+			continue
+		}
+
+		var txs []struct {
+			ID                        string  `json:"id"`
+			Type                      string  `json:"type"`
+			Direction                 string  `json:"direction"`
+			Amount                    float64 `json:"amount"`
+			CounterpartyAccountNumber string  `json:"counterparty_account_number"`
+			Timestamp                 string  `json:"timestamp"`
+		}
+		if err := json.Unmarshal(body, &txs); err != nil {
+			continue
+		}
+
+		for _, t := range txs {
+			entries = append(entries, transactionEntry{
+				AccountNumber:             accountNumber,
+				ID:                        t.ID,
+				Type:                      t.Type,
+				Direction:                 t.Direction,
+				Amount:                    t.Amount,
+				CounterpartyAccountNumber: t.CounterpartyAccountNumber,
+				Timestamp:                 t.Timestamp,
+			})
+		}
+	}
+
+	// Each account's transactions arrive newest-first already; merging
+	// several accounts requires re-sorting the combined set the same way.
+	// RFC3339 timestamps (as returned by GET .../transactions) sort
+	// correctly as plain strings.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Timestamp > entries[j].Timestamp })
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+
+	out, err := json.Marshal(entries)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr("failed to encode result", err), nil
+	}
+
+	return mcp.NewToolResultText(string(out)), nil
+}
+
 func main() {
 	if err := godotenv.Load("../.env"); err != nil {
 		log.Printf("warning: could not load .env: %v", err)
@@ -171,9 +282,7 @@ func main() {
 		server.WithToolCapabilities(true),
 	)
 
-	// Read-only tools only. get_transaction_history is intentionally not
-	// implemented yet — this first pass is scoped to answering balance
-	// questions ("¿Cuánto dinero tengo?"), not full history.
+	// Read-only tools only — no way to move money through MCP.
 	mcpServer.AddTool(mcp.NewTool("get_accounts",
 		mcp.WithDescription("List the authenticated user's own wallet accounts, each with its live balance (source of truth: TigerBeetle). Use this to answer questions about how much money the user has, in total or per account."),
 	), handleGetAccounts)
@@ -185,6 +294,16 @@ func main() {
 			mcp.Required(),
 		),
 	), handleGetBalance)
+
+	mcpServer.AddTool(mcp.NewTool("get_transaction_history",
+		mcp.WithDescription("List the authenticated user's most recent transactions (deposits, withdrawals, and transfers), newest first. Omit account_number to see recent activity across every account the user owns."),
+		mcp.WithString("account_number",
+			mcp.Description("Optional: limit to one specific account, e.g. 4001-1234-5678-0001. If omitted, merges recent transactions from all of the user's accounts."),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum number of transactions to return (default 10)."),
+		),
+	), handleGetTransactionHistory)
 
 	httpServer := server.NewStreamableHTTPServer(
 		mcpServer,

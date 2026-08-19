@@ -484,14 +484,15 @@ Implemented in [`backend/api/chat.go`](backend/api/chat.go).
 - **No duplicated business logic.** Every tool is a thin wrapper that calls the existing HNL Wallet API (`GET /accounts`, `GET /accounts/{account_number}/balance`) instead of touching PostgreSQL or TigerBeetle itself. All ownership checks and balance computation stay defined in exactly one place.
 - **No new attack surface.** The MCP server never validates or inspects the bearer token it's given — it just forwards it. It is authorization-free by construction: an LLM can never see more than the user themselves could see by calling the API directly, because every tool call is subject to the exact same JWT + ownership checks as a normal request.
 
-### Tools (read-only, scoped to "how much money do I have")
+### Tools (read-only)
 
 | Tool | Wraps | Notes |
 |---|---|---|
 | `get_accounts` | `GET /accounts` + `GET /accounts/{account_number}` per account | Returns every account the caller owns, each with its live TigerBeetle balance — the single call that answers "¿Cuánto dinero tengo?" in one round trip |
-| `get_balance` | `GET /accounts/{account_number}/balance` | Answers a follow-up about one specific account |
+| `get_balance` | `GET /accounts/{account_number}/balance` | Answers a follow-up about one specific account, e.g. "¿Cuánto tengo en mi cuenta de ahorros?" |
+| `get_transaction_history` | `GET /accounts/{account_number}/transactions` (once per account) | Answers "¿Cuáles fueron mis últimas transacciones?". `account_number` is optional — omit it to merge and re-sort recent transactions across every account the caller owns; `limit` (default `10`) applies to the merged result, not per account |
 
-`get_transaction_history` is intentionally **not implemented yet** — this first pass is scoped to balance questions, per the goal of getting `get_accounts`/`get_balance` working end-to-end before adding history.
+`get_transaction_history` with no `account_number` fetches each account's history separately (best-effort — one account's request failing doesn't fail the others) and merges them by timestamp, since a transaction is only ever queryable per-account through the REST API. A same-user `internal_transfer` therefore appears once from each side (outgoing on the source account, incoming on the destination) when both belong to the accounts being merged — that's the same shape `GET .../transactions` already returns per account, just combined.
 
 ### Model configuration
 
@@ -521,8 +522,11 @@ Verified against the running stack in two passes:
 1. **MCP layer alone**, with a raw MCP client bypassing OpenRouter: `get_accounts` and `get_balance` correctly return live TigerBeetle balances through the full `MCP client -> mcp-server -> Go API -> TigerBeetle` chain, and ownership is enforced through MCP exactly like a normal request — calling `get_balance` for an account the caller doesn't own returns the same `404` as `GET /accounts/{account_number}/balance` would, surfaced as an MCP tool error (`isError: true`) rather than leaking data.
 2. **The full path with a real model**, `POST /chat` end to end:
 
-   - `"¿Cuánto dinero tengo?"` → `"Tienes un total de **$13,974.24 USD** en tu cuenta corriente."` — matching the account's live balance exactly.
-   - An indirect phrasing (`"quisiera saber el saldo de mi cuenta de checking"`) resolved correctly too — the model doesn't need the exact target phrase.
+   - `"¿Cuánto dinero tengo?"` → `"Tienes un total de **$13,974.24 USD** en tu cuenta corriente."` — matching the account's live balance exactly (`get_accounts`).
+   - An indirect phrasing (`"quisiera saber el saldo de mi cuenta de checking"`) resolved correctly too — the model doesn't need the exact target phrase (`get_balance`).
+   - `"¿Cuáles fueron mis últimas transacciones?"` on a single-account user returned that account's 9 real transactions, correctly ordered newest-first (`get_transaction_history`, no `account_number`).
+   - The same question on a **three-account** user correctly merged and re-sorted transactions across all three accounts into one list, each row correctly labeled with which account it belongs to — including a same-user `internal_transfer` showing up once from each side, as expected.
+   - `"Muéstrame las últimas 3 transacciones de la cuenta 4001-6837-3940-0971"` correctly extracted **both** `account_number` and `limit=3` from natural language and returned exactly 3 rows for that one account.
    - Asking for another user's account by number correctly fails to leak anything — the tool call returns `404`, and the model relays that it isn't in "your portfolio" rather than fabricating a balance.
    - An unrelated question (`"¿Qué es TigerBeetle?"`) gets a normal answer without spuriously invoking a tool.
 
