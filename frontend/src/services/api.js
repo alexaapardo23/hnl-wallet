@@ -46,3 +46,12 @@ export const authService = {
   /** @returns {Promise<import('../types').User>} */
   me: (token) => request("/me", { token }),
 };
+
+export const accountsService = {
+  /**
+   * Every balance here — per account and the total — is computed
+   * server-side from TigerBeetle; this just relays what the API returns.
+   * @returns {Promise<import('../types').AccountsSummary>}
+   */
+  summary: (token) => request("/accounts/summary", { token }),
+};

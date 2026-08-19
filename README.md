@@ -310,9 +310,34 @@ Dashboard
 - `AuthContext` ([`src/context/AuthContext.jsx`](frontend/src/context/AuthContext.jsx)) holds `token` + `user`, persists the JWT to `localStorage`, and — on every page load where a token is already stored — re-validates it with `GET /me` before treating the session as live (a token that's expired or been invalidated server-side gets dropped, not trusted blindly).
 - `ProtectedRoute` ([`src/components/ProtectedRoute.jsx`](frontend/src/components/ProtectedRoute.jsx)) redirects to `/login` when there's no token, and shows a spinner while that initial `GET /me` check is in flight.
 - The login form only takes `email` + `password`, matching what was asked for — it doesn't expose `account_number`. Logging in with one of the seed's 20 duplicate-email accounts (see [Login and Duplicate Emails](#login-and-duplicate-emails)) therefore surfaces the API's own disambiguation error directly (*"multiple accounts share this email; account_number is required to log in"*) rather than silently failing.
-- `Dashboard` ([`src/pages/Dashboard.jsx`](frontend/src/pages/Dashboard.jsx)) is intentionally minimal at this stage — a welcome message (from the freshly-fetched `GET /me`, not just whatever `POST /auth/login` returned) and a logout button — confirming the session actually works end to end. The real accounts/balances dashboard is separate, follow-up work.
-
 Verified in a real browser against the running API: successful login for a non-duplicate seed user redirects to `/dashboard` and renders the correct name/email; the ambiguous-email error, and a wrong-password error, both render inline on `/login`; the session survives a full page reload (re-validated via `GET /me`); logout clears it; and visiting `/dashboard` directly with no session redirects to `/login`.
+
+### Dashboard
+
+`/dashboard` — total balance, then every account with its own balance and a masked account number:
+
+```text
+┌──────────────────────────────────────────────┐
+│ HNL Wallet                            Teresa │
+├──────────────────────────────────────────────┤
+│ Total Balance                                 │
+│ $76,074.82                                    │
+├──────────────────────────────────────────────┤
+│ My Accounts                                   │
+│ Investment              $23,503.34            │
+│ •••• 0800                                     │
+│ Savings                 $43,629.32            │
+│ •••• 0799                                     │
+│ Checking                 $8,942.16            │
+│ •••• 0798                                     │
+└──────────────────────────────────────────────┘
+```
+
+**The balance comes from the backend/TigerBeetle, never calculated in React.** `useAccountsSummary` ([`src/hooks/useAccountsSummary.js`](frontend/src/hooks/useAccountsSummary.js)) calls the new `GET /accounts/summary` (see [API Endpoints](#api-endpoints) and [`accountsSummaryHandler`](backend/api/accounts.go)), which fetches every account's live balance from TigerBeetle and **sums them into `total_balance` in Go**, not in the browser. `Dashboard.jsx` only ever renders `total_balance` and each `account.balance` exactly as received — it doesn't add, subtract, or derive any of them from `initial_balance` or transaction history itself. This is the same principle as [Balance Reconciliation](#balance-reconciliation-initial_balance-vs-transactions) and every other balance-reading endpoint in this project: TigerBeetle computes it once, on the server, and everything downstream just displays it.
+
+Other details: account numbers are masked to their last 4 digits (`•••• 0800`), `account_type` is title-cased for display (`checking` → `Checking`) without changing what the API returns, and both the balance card and the account list show a skeleton placeholder while `GET /accounts/summary` is in flight rather than a blank page.
+
+Verified in a real browser against the running API, logged in as a real seed user with three accounts (checking, savings, investment): the rendered total and all three per-account balances matched `GET /accounts/summary`'s response exactly (`$76,074.82` total; `$23,503.34` / `$43,629.32` / `$8,942.16` for investment / savings / checking respectively), and the layout was checked at both desktop and mobile viewport widths.
 
 ### Talking to the API from the browser
 
@@ -344,6 +369,7 @@ All request/response bodies are JSON. Endpoints under `Auth required` expect `Au
 | `GET` | `/me` | Yes | The authenticated user's own profile (`id`, `email`, `full_name`, `created_at`) |
 | `POST` | `/accounts` | Yes | Open a new account (`{"account_type": "checking" \| "savings" \| "investment"}`) for the authenticated user, balance starts at `0` |
 | `GET` | `/accounts` | Yes | List the authenticated user's accounts |
+| `GET` | `/accounts/summary` | Yes | Every account's live balance plus `total_balance` (summed in Go, from those same TigerBeetle-sourced numbers) — powers the frontend [Dashboard](#dashboard) |
 | `GET` | `/accounts/{account_number}` | Yes | PostgreSQL metadata (`account_type`, `currency`, `initial_balance`) plus live `balance` from TigerBeetle, in one call |
 | `GET` | `/accounts/{account_number}/balance` | Yes | Live balance from TigerBeetle only — lighter-weight than the detail endpoint above, for polling |
 | `GET` | `/accounts/{account_number}/transactions` | Yes | Transfer history for the account, newest first (`?limit=`, default `50`, max `200`) — see note below |

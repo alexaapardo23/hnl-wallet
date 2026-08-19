@@ -155,6 +155,88 @@ func (s *Server) listAccountsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, accounts)
 }
 
+type accountSummaryItem struct {
+	AccountNumber string  `json:"account_number"`
+	AccountType   string  `json:"account_type"`
+	Currency      string  `json:"currency"`
+	Balance       float64 `json:"balance"`
+}
+
+type accountsSummaryResponse struct {
+	TotalBalance float64              `json:"total_balance"`
+	Currency     string               `json:"currency"`
+	Accounts     []accountSummaryItem `json:"accounts"`
+}
+
+// accountsSummaryHandler powers the dashboard: every account the caller
+// owns with its live TigerBeetle balance, plus the total across all of
+// them — summed here, in Go, from those same TigerBeetle-sourced numbers.
+// The frontend only ever renders total_balance as given; it never derives
+// it from initial_balance, transactions, or by summing account balances
+// itself (see README "The balance comes from the backend/TigerBeetle,
+// never calculated in React").
+func (s *Server) accountsSummaryHandler(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromContext(r)
+
+	rows, err := s.DB.Query(
+		r.Context(),
+		`SELECT account_number, currency, account_type, tigerbeetle_account_id FROM accounts WHERE user_id = $1 ORDER BY account_number`,
+		userID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list accounts")
+		return
+	}
+	defer rows.Close()
+
+	type row struct {
+		accountNumber, currency, accountType, tigerbeetleAccountID string
+	}
+	var accountRows []row
+	for rows.Next() {
+		var rr row
+		if err := rows.Scan(&rr.accountNumber, &rr.currency, &rr.accountType, &rr.tigerbeetleAccountID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read accounts")
+			return
+		}
+		accountRows = append(accountRows, rr)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read accounts")
+		return
+	}
+
+	var totalCents int64
+	accounts := make([]accountSummaryItem, 0, len(accountRows))
+	for _, rr := range accountRows {
+		tbID, err := tigerbeetle.ParseUUIDString(rr.tigerbeetleAccountID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode TigerBeetle account ID")
+			return
+		}
+
+		cents, err := s.balanceCents(tbID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to fetch balance from TigerBeetle")
+			return
+		}
+
+		totalCents += cents
+		accounts = append(accounts, accountSummaryItem{
+			AccountNumber: rr.accountNumber,
+			AccountType:   rr.accountType,
+			Currency:      rr.currency,
+			Balance:       float64(cents) / 100,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, accountsSummaryResponse{
+		TotalBalance: float64(totalCents) / 100,
+		Currency:     "USD",
+		Accounts:     accounts,
+	})
+}
+
 // ownedAccount is an account's PostgreSQL metadata plus its resolved
 // TigerBeetle ID, scoped to a single owning user.
 type ownedAccount struct {

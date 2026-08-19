@@ -14,22 +14,158 @@
 .dashboard-header h1 {
   font-size: 18px;
   font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.dashboard-header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.dashboard-user {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-muted);
 }
 
 .dashboard-content {
   max-width: 640px;
-  margin: 48px auto;
-  padding: 0 24px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.retry-link {
+  border: none;
+  background: none;
+  padding: 0;
+  margin-left: 4px;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* Total balance */
+
+.balance-card {
+  background: var(--color-primary);
+  color: #fff;
+  border-radius: var(--radius);
+  padding: 28px 28px 32px;
+  box-shadow: var(--shadow-sm);
+}
+
+.balance-label {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.balance-amount {
+  margin-top: 10px;
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.balance-skeleton {
+  margin-top: 14px;
+  height: 36px;
+  width: 220px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.15);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* Accounts */
+
+.accounts-section h2 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 12px;
+}
+
+.accounts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.account-row--skeleton {
+  height: 62px;
+  background: linear-gradient(90deg, var(--color-surface) 25%, var(--color-bg) 37%, var(--color-surface) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+
+.account-info {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.dashboard-content h2 {
-  font-size: 20px;
-  font-weight: 700;
+.account-type {
+  font-weight: 600;
+  font-size: 15px;
 }
 
-.dashboard-content p {
+.account-number {
+  font-size: 13px;
   color: var(--color-text-muted);
+  letter-spacing: 0.03em;
+}
+
+.account-balance {
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.accounts-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 14px;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
 }

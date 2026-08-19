@@ -38,6 +38,7 @@ func NewRouter(s *Server) http.Handler {
 
 	mux.Handle("POST /accounts", s.requireAuth(http.HandlerFunc(s.createAccountHandler)))
 	mux.Handle("GET /accounts", s.requireAuth(http.HandlerFunc(s.listAccountsHandler)))
+	mux.Handle("GET /accounts/summary", s.requireAuth(http.HandlerFunc(s.accountsSummaryHandler)))
 	mux.Handle("GET /accounts/{account_number}", s.requireAuth(http.HandlerFunc(s.accountDetailHandler)))
 	mux.Handle("GET /accounts/{account_number}/balance", s.requireAuth(http.HandlerFunc(s.accountBalanceHandler)))
 	mux.Handle("GET /accounts/{account_number}/transactions", s.requireAuth(http.HandlerFunc(s.accountTransactionsHandler)))
