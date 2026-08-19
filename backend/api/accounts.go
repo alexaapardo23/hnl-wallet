@@ -196,6 +196,40 @@ func (s *Server) lookupOwnedAccount(ctx context.Context, accountNumber, userID s
 	return a, err
 }
 
+// accountRef is the minimal identity of an account regardless of who owns
+// it — used to look up a transfer's destination, which isn't necessarily
+// owned by the caller.
+type accountRef struct {
+	AccountNumber string
+	UserID        string
+	TigerBeetleID tb.Uint128
+}
+
+// lookupAccountByNumber resolves account_number to its owner and
+// TigerBeetle ID without an ownership restriction, unlike
+// lookupOwnedAccount — needed to validate a transfer's destination account,
+// which may belong to a different user.
+func (s *Server) lookupAccountByNumber(ctx context.Context, accountNumber string) (accountRef, error) {
+	var a accountRef
+	var tigerbeetleAccountID string
+
+	err := s.DB.QueryRow(
+		ctx,
+		`SELECT account_number, user_id, tigerbeetle_account_id FROM accounts WHERE account_number = $1`,
+		accountNumber,
+	).Scan(&a.AccountNumber, &a.UserID, &tigerbeetleAccountID)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return accountRef{}, errAccountNotFound
+	}
+	if err != nil {
+		return accountRef{}, err
+	}
+
+	a.TigerBeetleID, err = tigerbeetle.ParseUUIDString(tigerbeetleAccountID)
+	return a, err
+}
+
 // balanceCents fetches an account's live balance from TigerBeetle:
 // CreditsPosted - DebitsPosted, not a stored column — see README Financial
 // Data Model: TigerBeetle is the source of truth.

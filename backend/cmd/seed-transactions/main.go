@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"math"
 	"os"
 
 	tb "github.com/tigerbeetle/tigerbeetle-go"
@@ -17,10 +16,6 @@ const (
 	ledger          = 700
 	externalAccount = "EXTERNAL"
 )
-
-func centsFromDollars(dollars float64) uint64 {
-	return uint64(math.Round(dollars * 100))
-}
 
 // resolveAccountID maps a data.json account_number (or the EXTERNAL
 // sentinel) to its TigerBeetle account ID.
@@ -72,7 +67,7 @@ func buildTransfer(t models.Transaction, index map[string]int) (tb.Transfer, err
 		ID:              tb.ID(),
 		DebitAccountID:  debitID,
 		CreditAccountID: creditID,
-		Amount:          tb.ToUint128(centsFromDollars(t.Amount)),
+		Amount:          tb.ToUint128(tigerbeetle.CentsFromDollars(t.Amount)),
 		Ledger:          ledger,
 		Code:            code,
 	}, nil

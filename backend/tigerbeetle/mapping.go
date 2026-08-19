@@ -2,10 +2,18 @@ package tigerbeetle
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	tb "github.com/tigerbeetle/tigerbeetle-go"
 )
+
+// CentsFromDollars converts a dollar amount (as used throughout data.json
+// and API request bodies) into the integer cents TigerBeetle amounts are
+// represented in — see README Currency Representation.
+func CentsFromDollars(dollars float64) uint64 {
+	return uint64(math.Round(dollars * 100))
+}
 
 // SystemAccountIDValue is the reserved TigerBeetle account ID representing
 // the external funding source ("the bank"): deposits originate from it and
