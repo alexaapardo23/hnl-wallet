@@ -115,14 +115,11 @@ This same `io_uring` requirement applies to TigerBeetle's Go *client*, not just 
 
 ### First-time setup: formatting the data file
 
-`docker-compose.yml`'s `tigerbeetle` service only ever *starts* TigerBeetle (`start --addresses=... /data/0.tigerbeetle`) — the very first time, before anything has been written to the `tigerbeetle_data` volume, that file doesn't exist yet and needs to be formatted once:
+TigerBeetle's data file has to be formatted once, before its first `start`, or `start` fails against it. `docker-compose.yml`'s `tigerbeetle` service handles this itself — its `command` is a small shell script (`if [ ! -f /data/0.tigerbeetle ]; then tigerbeetle format ...; fi; exec tigerbeetle start ...`) that formats only when the file doesn't exist yet, then starts — so plain `docker compose up` works both the very first time and on every later run, with no manual step. If you're running TigerBeetle outside Docker (or want to run the check yourself), the equivalent manual command is:
 
 ```bash
-docker compose run --rm tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0.tigerbeetle
-docker compose up -d
+tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0.tigerbeetle
 ```
-
-Skip this on every subsequent `docker compose up` — the volume persists the formatted file, and re-running `format` against an already-formatted one fails.
 
 ## Financial Data Model
 
@@ -500,6 +497,8 @@ Users are identified by three distinct attributes, each with a different purpose
 
 `users.email` does **not** have a uniqueness constraint at the database level. This was a deliberate decision — see [Authentication](#authentication) for the reasoning.
 
+The full schema — including `tigerbeetle_account_seq`, the sequence new accounts get their TigerBeetle ID from — lives in [`backend/database/schema.sql`](backend/database/schema.sql), applied automatically the first time `postgres` boots against an empty volume (see [Docker](#docker)). It's kept as a file extracted from the live schema (`pg_dump --schema-only`) rather than hand-maintained separately, so it can't silently drift from what the Go code actually expects.
+
 ## API Endpoints
 
 All request/response bodies are JSON. Endpoints under `Auth required` expect `Authorization: Bearer <token>` (see [Authentication](#authentication)).
@@ -848,7 +847,7 @@ Copy [`.env.example`](.env.example) to `.env` (git-ignored) and fill it in. All 
 | `MCP_SERVER_PORT` | `cmd/mcp-server` | Default `8081` |
 | `FRONTEND_URL` | server | Origin allowed to call the API from a browser (CORS), default `http://localhost:5173` |
 
-TigerBeetle's address (`127.0.0.1:3000`) is currently hardcoded in [`tigerbeetle.NewClient`](backend/tigerbeetle/client.go) rather than read from the environment.
+`TIGERBEETLE_ADDRESS` is read by [`tigerbeetle.NewClient`](backend/tigerbeetle/client.go), defaulting to `127.0.0.1:3000` when unset (local dev outside Docker); `docker-compose.yml` sets it to `tigerbeetle:3000` for `api` and `seed`.
 
 `frontend/` has its own [`.env.example`](frontend/.env.example) (copy to `frontend/.env`), read by Vite — just `VITE_API_URL`, default `http://localhost:8080`.
 
@@ -877,12 +876,11 @@ Open the URL Vite prints (`http://localhost:5173` by default). See [Docker](#doc
 
 ## Docker
 
-`docker compose up -d` builds and runs everything: `postgres`, `tigerbeetle`, `api` ([`backend/Dockerfile`](backend/Dockerfile)), `mcp-server` (same image, different `command:`), and `frontend` ([`frontend/Dockerfile`](frontend/Dockerfile), built and served via nginx). One prerequisite this doesn't automate — see [TigerBeetle](#tigerbeetle) — is formatting the TigerBeetle data file the very first time, before any container has written to that volume:
+**`docker compose up -d` is the entire setup — nothing else needs to run first.** It builds and runs `postgres` (schema applied automatically from [`backend/database/schema.sql`](backend/database/schema.sql), see [Database Schema](#database-schema)), `tigerbeetle` (data file formatted automatically on first boot, see [TigerBeetle](#tigerbeetle)), `seed` (one-shot: loads `data/data.json` into both databases, see [Seed Data](#seed-data)), `api` ([`backend/Dockerfile`](backend/Dockerfile)), `mcp-server` (same image, different `command:`), and `frontend` ([`frontend/Dockerfile`](frontend/Dockerfile), built and served via nginx). `api`, `mcp-server`, and `frontend` all wait (via `depends_on`) for `seed` to finish successfully before starting, so there's no race against an empty database.
 
-```bash
-docker compose run --rm tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0.tigerbeetle
-docker compose up -d
-```
+`seed` is safe to leave running on every `docker compose up`, not just the first: it starts with a guard (`cmd/seed-guard`, wired through [`backend/scripts/seed-all.sh`](backend/scripts/seed-all.sh)) that checks whether `users` already has rows and exits immediately if so, skipping the whole pipeline. This matters because re-running the TigerBeetle steps isn't itself safe — `seed-initial-balances`/`seed-transactions` create transfers with random IDs (`tb.ID()`), not ones derived from the source data, so a second unguarded run would double-credit every account rather than being deduplicated the way the Postgres `ON CONFLICT DO NOTHING` inserts are.
+
+Verified against a genuinely clean slate, not just `docker compose config`: `docker compose down -v` (dropping both `postgres_data` and `tigerbeetle_data`), then a plain `docker compose up -d` with no other commands run in between. `seed`'s logs showed all four steps completing (1000 users / 1605 accounts / 6429 transactions into Postgres, 1606 TigerBeetle accounts, 1605 initial-balance transfers, 6429 historical transfers) and exiting 0; `api`, `mcp-server`, and `frontend` all started clean afterward. A registration through the live `api` container worked immediately, and a seed account's balance fetched through the API (`$20,820.67`) matched a balance independently recomputed from `data/data.json` (`initial_balance` plus the net of every transaction touching that account) exactly. Re-running `docker compose up -d --force-recreate seed` against that same, now-seeded volume logged `users table already has 1000 rows — already seeded` and exited 0 without touching either database again.
 
 Two things that only surfaced by actually building and running these images, not from reading the code:
 
@@ -899,7 +897,7 @@ Verified against the running containers, not just `docker compose config`: `POST
 
 `data/data.json` intentionally includes 20 pairs of users (40 users total) sharing the same email address, each with their own accounts and transaction history. See [Authentication](#authentication) for how this is handled.
 
-Seeding is a four-step process:
+**Via Docker, this is fully automatic** — `docker compose up -d` runs all four steps below through the one-shot `seed` service ([`backend/scripts/seed-all.sh`](backend/scripts/seed-all.sh)), gated by `cmd/seed-guard` so it only runs once per volume. See [Docker](#docker) for the verified end-to-end run. What follows is the same four-step process run manually, for local development without Docker (`go run ./cmd/api` etc., see [Running the Application](#running-the-application)):
 
 ```bash
 # 1. PostgreSQL: users, accounts (with their tigerbeetle_account_id mapping), transactions

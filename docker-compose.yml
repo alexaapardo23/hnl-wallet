@@ -10,6 +10,9 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Applied once by the postgres image's own entrypoint, only when
+      # the volume is still empty — see backend/database/schema.sql.
+      - ./backend/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hnl_user -d hnl_wallet"]
       interval: 5s
@@ -19,16 +22,64 @@ services:
   tigerbeetle:
     image: ghcr.io/tigerbeetle/tigerbeetle:latest
     container_name: hnl-tigerbeetle
-    # Requires the data file to already be formatted — see README
-    # TigerBeetle for the one-time `... format ...` step against this same
-    # volume before the first `docker compose up`.
-    command: start --addresses=0.0.0.0:3000 /data/0.tigerbeetle
+    # TigerBeetle's data file must be formatted once, before the first
+    # `start`, or `start` fails against it. Rather than requiring that as
+    # a manual step before `docker compose up` (see README TigerBeetle),
+    # the entrypoint formats it here if it doesn't exist yet, then starts
+    # — a no-op format check on every later boot, since the file persists
+    # in the tigerbeetle_data volume.
+    # Keeps the image's own tini (PID 1 / signal reaping) ahead of our sh
+    # wrapper — see `docker inspect ...tigerbeetle --format
+    # '{{.Config.Entrypoint}}'` (["tini", "--", "/tigerbeetle"]) for the
+    # default this replaces.
+    entrypoint: ["tini", "--", "sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ ! -f /data/0.tigerbeetle ]; then
+          echo "Formatting TigerBeetle data file..."
+          /tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0.tigerbeetle
+        fi
+        exec /tigerbeetle start --addresses=0.0.0.0:3000 /data/0.tigerbeetle
     ports:
       - "3000:3000"
     volumes:
       - tigerbeetle_data:/data
     security_opt:
       - seccomp=unconfined
+
+  # One-shot: seeds data/data.json into both Postgres and TigerBeetle,
+  # then exits. Runs seed-all.sh, which skips the whole pipeline (via
+  # seed-guard) if the users table is already non-empty — safe to leave
+  # in the stack on every `docker compose up`, not just the first.
+  seed:
+    build:
+      context: ./backend
+    container_name: hnl-seed
+    command: ["./seed-all.sh"]
+    # Same io_uring reasoning as `api` below — seed-tigerbeetle,
+    # seed-initial-balances and seed-transactions all call
+    # tigerbeetle.NewClient() too.
+    security_opt:
+      - seccomp=unconfined
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tigerbeetle:
+        condition: service_started
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-hnl_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hnl_password}
+      POSTGRES_DB: ${POSTGRES_DB:-hnl_wallet}
+      TIGERBEETLE_ADDRESS: tigerbeetle:3000
+      DATA_FILE: /app/data/data.json
+    volumes:
+      # Seed data, not code — mounted read-only rather than baked into
+      # the image so a bind mount, not a rebuild, is enough to reseed
+      # from an edited data.json.
+      - ./data:/app/data:ro
 
   api:
     build:
@@ -45,6 +96,8 @@ services:
         condition: service_healthy
       tigerbeetle:
         condition: service_started
+      seed:
+        condition: service_completed_successfully
     environment:
       # Container-to-container addresses — services reach each other by
       # name on Docker's internal network, never by 127.0.0.1/localhost

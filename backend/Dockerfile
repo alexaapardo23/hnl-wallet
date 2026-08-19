@@ -26,13 +26,18 @@ RUN go mod download
 
 COPY . .
 
-# Only the two long-running services get built into the image. The
-# one-off seed/import programs under cmd/ (seed, seed-tigerbeetle,
-# seed-transactions, ...) are ops tooling meant to be run once against a
-# fresh environment — see README Seed Data — not containerized services,
-# so they're intentionally left out of this image.
+# The two long-running services, plus the one-off seed/import programs
+# under cmd/ — those run once, orchestrated by scripts/seed-all.sh, as
+# docker-compose's one-shot `seed` service (see README Seed Data). They
+# ship in this same image rather than a separate one to avoid maintaining
+# a second Dockerfile for five small Go binaries.
 RUN go build -o /out/api ./cmd/api
 RUN go build -o /out/mcp-server ./cmd/mcp-server
+RUN go build -o /out/seed ./cmd/seed
+RUN go build -o /out/seed-tigerbeetle ./cmd/seed-tigerbeetle
+RUN go build -o /out/seed-initial-balances ./cmd/seed-initial-balances
+RUN go build -o /out/seed-transactions ./cmd/seed-transactions
+RUN go build -o /out/seed-guard ./cmd/seed-guard
 
 FROM debian:bookworm-slim
 
@@ -40,10 +45,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /out/api /out/mcp-server ./
+COPY --from=builder /out/api /out/mcp-server /out/seed /out/seed-tigerbeetle /out/seed-initial-balances /out/seed-transactions /out/seed-guard ./
+COPY scripts/seed-all.sh ./
+RUN chmod +x ./seed-all.sh
 
-# Both binaries ship in one image; docker-compose runs two services from
-# it with different `command:` overrides (see docker-compose.yml) rather
-# than maintaining two near-identical Dockerfiles.
+# All binaries ship in one image; docker-compose runs different services
+# from it with different `command:` overrides (see docker-compose.yml)
+# rather than maintaining several near-identical Dockerfiles.
 EXPOSE 8080 8081
 CMD ["./api"]
