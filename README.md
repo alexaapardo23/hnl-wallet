@@ -214,6 +214,27 @@ Since `user_id` (not `email`) is the true internal identity, and `account_number
 
 ## Financial Operations
 
+### Balance Reconciliation (initial_balance vs. transactions)
+
+For each account, a balance can be derived from the seed dataset alone:
+
+```text
+calculated_balance =
+  initial_balance
+  + deposits            (EXTERNAL → account)
+  + incoming transfers  (transfer / internal_transfer into the account)
+  - withdrawals         (account → EXTERNAL)
+  - outgoing transfers  (transfer / internal_transfer out of the account)
+```
+
+This was checked against `data/data.json` (1605 accounts, 6429 transactions, all `status: completed`):
+
+- **Referential integrity**: every `from_account` / `to_account` in `transactions` resolves to a real `account_number` or the `EXTERNAL` sentinel — 0 orphan references.
+- **Aggregate consistency**: `transfer` / `internal_transfer` are zero-sum within the system, so the sum of all `calculated_balance` values must equal `Σ initial_balance + Σ deposits - Σ withdrawals`. Verified exactly: both sides equal **$40,364,992.41**, difference `0.00`.
+- **Negative balances**: 70 of 1605 accounts (4.4%) end up with a negative `calculated_balance` (as low as **-$10,933.69**), spread evenly across account types (savings 4.2%, checking 4.1%, investment 6.4%).
+
+The dataset does not prevent overdrafts — transaction amounts are not capped by available balance. This is assumed to be intentional test data, since TigerBeetle supports enforcing non-negative balances via account flags (e.g. `debits_must_not_exceed_credits`), which is not yet wired up in this project.
+
 ## AI / MCP Integration
 
 ## Environment Variables
