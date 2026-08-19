@@ -1,5 +1,6 @@
 package main
-
+/*The seed dataset contains duplicate email addresses associated with different users. 
+User identity is therefore based on the internal UUID rather than email.*/
 import (
 	"context"
 	"fmt"

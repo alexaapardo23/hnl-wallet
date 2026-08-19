@@ -182,9 +182,35 @@ The expected services are:
 
 ## Database Schema
 
+### Identity Model
+
+Users are identified by three distinct attributes, each with a different purpose:
+
+| Attribute | Role | Unique? |
+|---|---|---|
+| `user_id` (UUID) | Internal identity — primary key, used for all internal relations (accounts, ownership) | Yes |
+| `account_number` | Visible financial identity — what identifies a wallet/account for transfers | Yes |
+| `email` | Contact / authentication attribute | **No** |
+
+`users.email` does **not** have a uniqueness constraint at the database level. This was a deliberate decision — see [Authentication](#authentication) for the reasoning.
+
 ## API Endpoints
 
 ## Authentication
+
+### Duplicate emails are allowed by design
+
+The seed dataset (`data/data.json`) intentionally contains users that share the same email address but have different `user_id`s, `full_name`s, and their own real accounts/transactions in TigerBeetle. This was verified: all 40 users involved in the 20 duplicate-email groups have active accounts and transaction history.
+
+Since `user_id` (not `email`) is the true internal identity, and `account_number` is the true financial identity, a `UNIQUE` constraint on `users.email` was removed from the schema — enforcing it would have made it impossible to seed this intentionally "dirty" dataset without discarding or rewriting real financial data tied to those users, which was considered out of scope for this exercise.
+
+**Practical consequence for login (not yet implemented):** since `email` alone cannot uniquely identify a user, and some duplicate-email pairs even share the same password, login must not rely on `email` + `password` alone. The planned login credentials are:
+
+- `email`
+- `password`
+- `account_number`
+
+`account_number` disambiguates between users that share both email and password, while keeping `email` as a contact/login-facing attribute rather than a strict unique identifier.
 
 ## Financial Operations
 
@@ -197,3 +223,5 @@ The expected services are:
 ## Running the Application
 
 ## Seed Data
+
+`data/data.json` intentionally includes 20 pairs of users (40 users total) sharing the same email address, each with their own accounts and transaction history. See [Authentication](#authentication) for how this is handled.
