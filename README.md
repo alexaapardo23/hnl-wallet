@@ -181,6 +181,23 @@ tigerbeetle_account_id
 
 `UserData64` and `UserData32` are currently unused.
 
+### Initial Balance Funding
+
+`accounts.initial_balance` isn't written directly into a TigerBeetle account (accounts always start at a zero balance — TigerBeetle has no "set balance" operation). Instead it's posted as a transfer:
+
+```text
+initial_balance
+      ↓
+INITIAL FUNDING transfer   (DebitAccountID = SYSTEM, CreditAccountID = account, Code = 100)
+      ↓
+TigerBeetle balance
+```
+
+- **`Code 100`** is reserved for `CodeInitialBalance` — the one-time transfer that seeds an account when it's first provisioned. It lives in the *transfer* code namespace, which is independent from the *account* codes above (`1`/`10`/`11`/`12`); `100` was picked simply to keep it visually distinct from those when both appear together, not because the number itself carries meaning.
+- Amounts are converted from `data.json` dollars to integer cents (see [Currency Representation](#currency-representation)) before being posted.
+- Because every funding transfer debits `SystemAccountID` and credits the real account, **`SystemAccountID`'s `DebitsPosted` accumulates to exactly `Σ initial_balance`** across all accounts — verified: `$40,173,713.36`, matching the [Balance Reconciliation](#balance-reconciliation-initial_balance-vs-transactions) total computed from `data.json` alone.
+- Implemented in [`cmd/seed-initial-balances`](backend/cmd/seed-initial-balances/main.go), run after both `cmd/seed` and `cmd/seed-tigerbeetle`.
+
 ### Development Accounts (early manual example — superseded)
 
 Earlier in development, before the [Account ID Mapping](#account-id-mapping) above existed, three accounts were created manually in TigerBeetle to explore the API:
@@ -283,7 +300,7 @@ The dataset does not prevent overdrafts — transaction amounts are not capped b
 
 `data/data.json` intentionally includes 20 pairs of users (40 users total) sharing the same email address, each with their own accounts and transaction history. See [Authentication](#authentication) for how this is handled.
 
-Seeding is a two-step process:
+Seeding is a three-step process:
 
 ```bash
 # 1. PostgreSQL: users, accounts (with their tigerbeetle_account_id mapping), transactions
@@ -292,6 +309,10 @@ go run ./cmd/seed
 # 2. TigerBeetle: the SYSTEM account (ID 1) + one account per row in accounts,
 #    using the same deterministic mapping — see Account ID Mapping.
 go run ./cmd/seed-tigerbeetle
+
+# 3. TigerBeetle: one INITIAL FUNDING transfer per account, posting its
+#    initial_balance — see Initial Balance Funding.
+go run ./cmd/seed-initial-balances
 ```
 
-`cmd/seed-tigerbeetle` only creates accounts (balances start at zero); it does not yet replay `data/data.json`'s transactions as TigerBeetle transfers, so TigerBeetle account balances won't reflect `initial_balance` or transaction history until that is implemented.
+After all three steps, TigerBeetle account balances reflect `initial_balance`, but not yet the 6429 transactions in `data/data.json` — replaying those as TigerBeetle transfers is not implemented yet.

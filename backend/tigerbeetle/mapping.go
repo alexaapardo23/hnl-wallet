@@ -92,3 +92,17 @@ func UserData128ToAccountNumber(userData tb.Uint128) string {
 
 	return fmt.Sprintf("%s-%s-%s-%s", digits[0:4], digits[4:8], digits[8:12], digits[12:16])
 }
+
+// Transfer codes. This is a separate namespace from Account codes (above) —
+// TigerBeetle gives Account and Transfer independent Code fields — but is
+// kept numerically distinct (100+) purely so the two never look ambiguous
+// side by side in logs or queries. The specific value carries no meaning
+// beyond being reserved and documented here.
+const (
+	// CodeInitialBalance marks the one-time funding transfer that seeds an
+	// account's initial_balance from SystemAccountID when the account is
+	// first provisioned. DebitAccountID is always SystemAccountID and
+	// CreditAccountID the account being funded, so SystemAccountID's
+	// DebitsPosted accumulates to sum(initial_balance) across all accounts.
+	CodeInitialBalance uint16 = 100
+)
