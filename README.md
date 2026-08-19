@@ -301,6 +301,7 @@ All request/response bodies are JSON. Endpoints under `Auth required` expect `Au
 | `GET` | `/accounts/{account_number}/balance` | Yes | Live balance from TigerBeetle only — lighter-weight than the detail endpoint above, for polling |
 | `GET` | `/accounts/{account_number}/transactions` | Yes | Transfer history for the account, newest first (`?limit=`, default `50`, max `200`) — see note below |
 | `POST` | `/accounts/{account_number}/deposit` | Yes | Credit the account from `SystemAccountID` (`{"amount": 500.25}`, must be `> 0`) — see [Financial Operations](#financial-operations) |
+| `POST` | `/accounts/{account_number}/withdraw` | Yes | Debit the account to `SystemAccountID` (`{"amount": 200.10}`, must be `> 0` and `<=` current balance) — see [Financial Operations](#financial-operations) |
 
 Every `/accounts/...` route is scoped to accounts owned by the authenticated user; another user's account (or a nonexistent one) returns `404` either way, so ownership can't be probed by comparing error responses.
 
@@ -359,7 +360,7 @@ The dataset does not prevent overdrafts — transaction amounts are not capped b
 Both anomalies documented above — duplicate emails and negative-balance overdrafts — are **only tolerated in the seed dataset**, never for data created through the API:
 
 - Duplicate emails: enforced already — see [New registrations require a unique email](#new-registrations-require-a-unique-email). `POST /auth/register` rejects any email already in use, seed or not.
-- Overdrafts: `POST /accounts/{account_number}/deposit` (see below) can only ever increase a balance, so it can't produce an overdraft. The first endpoint capable of *decreasing* a balance (a withdrawal or transfer) still doesn't exist yet — when one is added, it must set `debits_must_not_exceed_credits` (or reject in application code) so accounts created or moved through the API can't go negative the way seeded ones intentionally can.
+- Overdrafts: `POST /accounts/{account_number}/deposit` can only ever increase a balance, so it can't produce one. `POST /accounts/{account_number}/withdraw` (see below) *can* decrease a balance, and enforces "no new overdraft" itself — application-side, not via TigerBeetle's `debits_must_not_exceed_credits` flag, since no account (seeded or API-created) was created with that flag and TigerBeetle accounts are immutable, so it can't be added retroactively. This holds even for accounts already negative from the seed: a withdrawal from one of the 70 overdrawn accounts is still rejected, since it would only make the existing anomaly worse — verified against the most negative seed account (`-$10,933.69`), where a `$0.01` withdrawal is rejected but a deposit still succeeds.
 
 ### Deposits
 
@@ -382,6 +383,30 @@ TigerBeetle
 It reuses the exact same debit-leaves/credit-arrives convention and `CodeDeposit` (`101`) as the historical deposits imported by `cmd/seed-transactions` (see [Historical Transaction Import](#historical-transaction-import)) — a deposit made through the API and one replayed from `data.json` are indistinguishable in TigerBeetle except for their `Timestamp`. The response includes the new live balance, so the caller doesn't need a separate `GET .../balance` call to confirm the deposit landed.
 
 Implemented in [`backend/api/deposit.go`](backend/api/deposit.go).
+
+### Withdrawals
+
+`POST /accounts/{account_number}/withdraw` (`{"amount": 200.10}`) follows the mirror image of [Deposits](#deposits), with one extra step:
+
+```text
+request
+  ↓
+JWT → user_id
+  ↓
+verify the account belongs to the user
+  ↓
+validate amount > 0
+  ↓
+check amount <= current balance (live, from TigerBeetle)
+  ↓
+user account → SYSTEM   (Code = CodeWithdrawal = 102)
+  ↓
+TigerBeetle
+```
+
+The balance check is the important difference from `deposit`: it's the first operation that can *decrease* a balance, so it's also the first place [the no-new-overdrafts rule](#seed-anomalies-are-not-permitted-going-forward) actually applies. A withdrawal that would take the balance below `$0` is rejected with `422`, regardless of whether the account started positive or was already negative from the seed. This check reads the balance and then submits the transfer as two separate calls — under concurrent requests on the same account there's a race between them (TigerBeetle itself won't reject the transfer, since `debits_must_not_exceed_credits` isn't set), so this is an application-level safeguard against a single caller overdrawing, not a concurrency-safe guarantee.
+
+Implemented in [`backend/api/withdraw.go`](backend/api/withdraw.go).
 
 ## AI / MCP Integration
 

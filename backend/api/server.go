@@ -30,6 +30,7 @@ func NewRouter(s *Server) http.Handler {
 	mux.Handle("GET /accounts/{account_number}/balance", s.requireAuth(http.HandlerFunc(s.accountBalanceHandler)))
 	mux.Handle("GET /accounts/{account_number}/transactions", s.requireAuth(http.HandlerFunc(s.accountTransactionsHandler)))
 	mux.Handle("POST /accounts/{account_number}/deposit", s.requireAuth(http.HandlerFunc(s.depositHandler)))
+	mux.Handle("POST /accounts/{account_number}/withdraw", s.requireAuth(http.HandlerFunc(s.withdrawHandler)))
 
 	return mux
 }
